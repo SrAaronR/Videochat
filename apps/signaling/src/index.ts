@@ -103,6 +103,13 @@ const PAIS_POR_DEFECTO = process.env.PAIS_POR_DEFECTO || null;
 
 /** Ventana durante la que solo se acepta match por intereses en común. */
 const VENTANA_INTERESES_MS = Number(process.env.VENTANA_INTERESES_MS ?? 15_000);
+/**
+ * Ventana durante la que el filtro de país es obligatorio; pasada, se
+ * empareja con cualquier país (preferencia con margen). Más corta que la de
+ * intereses porque el país es una preferencia más "dura" y no conviene
+ * dejar al usuario esperando mucho si no hay nadie de ese país.
+ */
+const VENTANA_PAIS_MS = Number(process.env.VENTANA_PAIS_MS ?? 6_000);
 /** Cadencia del paso periódico de emparejamiento. */
 const INTERVALO_PASO_MS = 2_000;
 /** Cuántos matches recientes no se repiten. */
@@ -200,12 +207,25 @@ function interesesComunes(u: Esperando, v: Esperando): string[] {
 
 /**
  * Regla de intereses de un solo lado: `a` acepta a `b` si no puso intereses,
- * si ya agotó la ventana de 15 s, o si comparten al menos uno.
+ * si ya agotó la ventana de intereses, o si comparten al menos uno.
  */
 function aceptaPorIntereses(a: Esperando, b: Esperando, ahora: number): boolean {
   if (a.intereses.length === 0) return true;
   if (ahora - a.desde > VENTANA_INTERESES_MS) return true;
   return interesesComunes(a, b).length > 0;
+}
+
+/**
+ * Regla de país de un solo lado (preferencia con margen): `a` acepta a `b`
+ * si no puso filtro de país, si ya agotó la ventana de país (entonces se
+ * empareja con cualquiera), o si `b` es del país filtrado. Evita que un
+ * filtro de país deje al usuario esperando indefinidamente cuando no hay
+ * nadie de ese país (o la geolocalización por IP no coincide).
+ */
+function aceptaPorPais(a: Esperando, b: Esperando, ahora: number): boolean {
+  if (!a.filtroPais) return true;
+  if (ahora - a.desde > VENTANA_PAIS_MS) return true;
+  return b.pais === a.filtroPais;
 }
 
 /** Comprueba todas las reglas de compatibilidad entre dos usuarios en espera. */
@@ -220,11 +240,11 @@ function sonCompatibles(u: Esperando, v: Esperando, ahora: number): boolean {
   if (socketU.data.historial.includes(v.socketId)) return false;
   if (socketV.data.historial.includes(u.socketId)) return false;
 
-  // (d) Filtro de país: si un lado lo fijó, el otro debe cumplirlo.
-  if (u.filtroPais && v.pais !== u.filtroPais) return false;
-  if (v.filtroPais && u.pais !== v.filtroPais) return false;
+  // (d) Filtro de país como preferencia con margen (ventana de país), en
+  // ambos sentidos: pasado ese tiempo se acepta cualquier país.
+  if (!aceptaPorPais(u, v, ahora) || !aceptaPorPais(v, u, ahora)) return false;
 
-  // (a)/(b) Regla de intereses con ventana de 15 s, en ambos sentidos.
+  // (a)/(b) Regla de intereses con su ventana, en ambos sentidos.
   return aceptaPorIntereses(u, v, ahora) && aceptaPorIntereses(v, u, ahora);
 }
 

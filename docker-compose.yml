@@ -41,6 +41,9 @@ services:
       RATE_MENSAJES_POR_SEGUNDO: ${RATE_MENSAJES_POR_SEGUNDO:-5}
       # Detector NSFW automático: off | aviso | auto (ver .env.example).
       MODERACION_NSFW: ${MODERACION_NSFW:-aviso}
+      # Ventanas de emparejamiento (ms): intereses y país (preferencia con margen).
+      VENTANA_INTERESES_MS: ${VENTANA_INTERESES_MS:-15000}
+      VENTANA_PAIS_MS: ${VENTANA_PAIS_MS:-6000}
     ports:
       - '4000:4000'
     depends_on:
