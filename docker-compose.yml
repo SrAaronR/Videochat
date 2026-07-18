@@ -1,0 +1,87 @@
+# Plataforma de videochat aleatorio — orquestación local/VPS.
+# Copia .env.example a .env y ajusta las credenciales antes de levantar.
+#
+# Fase 1: web + signaling + redis funcionan de extremo a extremo.
+# postgres y coturn ya quedan declarados (se usan a partir de las Fases 2 y 4).
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # URL del signaling VISTA DESDE EL NAVEGADOR (no desde el contenedor).
+        NEXT_PUBLIC_SIGNALING_URL: ${NEXT_PUBLIC_SIGNALING_URL:-http://localhost:4000}
+    ports:
+      - '3000:3000'
+    depends_on:
+      signaling:
+        condition: service_started
+    restart: unless-stopped
+
+  signaling:
+    build:
+      context: .
+      dockerfile: apps/signaling/Dockerfile
+    environment:
+      PORT: 4000
+      REDIS_URL: redis://redis:6379
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+    ports:
+      - '4000:4000'
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'no']
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-videochat}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env}
+      POSTGRES_DB: ${POSTGRES_DB:-videochat}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER}']
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.6-alpine
+    # Config mínima por flags; ver docker/coturn/turnserver.conf.example
+    # para la configuración completa recomendada en producción.
+    command: >-
+      -n
+      --listening-port=3478
+      --min-port=49160 --max-port=49200
+      --realm=${TURN_REALM:-videochat.local}
+      --user=${TURN_USER:-videochat}:${TURN_PASSWORD:?Define TURN_PASSWORD en .env}
+      --lt-cred-mech
+      --fingerprint
+      --no-cli
+      --log-file=stdout
+    ports:
+      - '3478:3478'
+      - '3478:3478/udp'
+      - '49160-49200:49160-49200/udp'
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

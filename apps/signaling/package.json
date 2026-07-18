@@ -1,0 +1,22 @@
+{
+  "name": "@videochat/signaling",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servidor de señalización: Socket.IO + matchmaking con cola en Redis",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@videochat/shared": "*",
+    "ioredis": "^5.4.1",
+    "socket.io": "^4.7.5",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.5.4"
+  }
+}

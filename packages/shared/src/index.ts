@@ -1,0 +1,76 @@
+/**
+ * Contrato de eventos Socket.IO compartido entre el frontend (apps/web)
+ * y el servidor de señalización (apps/signaling).
+ *
+ * Fase 1: matchmaking aleatorio básico + chat de texto.
+ * Los eventos de WebRTC (`signal`) ya están declarados para la Fase 2,
+ * el servidor simplemente los reenvía al peer.
+ */
+
+/** Estados de la sesión de chat visibles en la UI. */
+export type EstadoChat =
+  | 'inactivo'
+  | 'buscando'
+  | 'conectado'
+  | 'peer_desconectado';
+
+/** Mensaje de chat tal y como lo entrega el servidor. */
+export interface MensajeChat {
+  /** Identificador único del mensaje (generado en el servidor). */
+  id: string;
+  /** Texto del mensaje, ya validado/recortado por el servidor. */
+  texto: string;
+  /** Id de socket del autor (para saber si es propio o del desconocido). */
+  autorId: string;
+  /** Timestamp de recepción en el servidor (ms epoch). */
+  timestamp: number;
+}
+
+/** Payload que reciben ambos usuarios cuando hay emparejamiento. */
+export interface MatchEncontrado {
+  roomId: string;
+  /** El servidor designa a un lado como initiator (creará la offer en Fase 2). */
+  initiator: boolean;
+  /** Id de socket del desconocido. */
+  peerId: string;
+}
+
+/** Motivos por los que el peer abandona la sala. */
+export type MotivoSalida = 'siguiente' | 'detener' | 'desconexion';
+
+/** Eventos que el servidor emite hacia el cliente. */
+export interface ServerToClientEvents {
+  /** Confirmación de que el usuario ha entrado en la cola. */
+  buscando: () => void;
+  /** Se ha encontrado pareja. */
+  match_found: (match: MatchEncontrado) => void;
+  /** Mensaje de chat retransmitido por el servidor. */
+  chat_message: (mensaje: MensajeChat) => void;
+  /** El desconocido está escribiendo (true) o ha dejado de escribir (false). */
+  typing: (escribiendo: boolean) => void;
+  /** El desconocido ha abandonado la sala. */
+  peer_left: (motivo: MotivoSalida) => void;
+  /** Relay de señalización WebRTC (offer/answer/ICE) — se usará en Fase 2. */
+  signal: (data: unknown) => void;
+  /** Error recuperable que la UI puede mostrar. */
+  error_chat: (mensaje: string) => void;
+}
+
+/** Eventos que el cliente emite hacia el servidor. */
+export interface ClientToServerEvents {
+  /** Entrar en la cola de emparejamiento. */
+  find_match: () => void;
+  /** Enviar un mensaje de chat (el servidor lo valida y retransmite). */
+  chat_message: (texto: string) => void;
+  /** Notificar que se está escribiendo o se ha dejado de escribir. */
+  typing: (escribiendo: boolean) => void;
+  /** Cortar el match actual y buscar otro inmediatamente. */
+  next: () => void;
+  /** Salir de la sala/cola y volver a la landing. */
+  stop: () => void;
+  /** Relay de señalización WebRTC — se usará en Fase 2. */
+  signal: (data: unknown) => void;
+}
+
+/** Longitud máxima de un mensaje de chat aceptada por el servidor. */
+export const MAX_LONGITUD_MENSAJE = 2000;

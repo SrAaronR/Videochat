@@ -1,0 +1,37 @@
+# Configuración de ejemplo para coturn (servidor TURN propio).
+# Copia este archivo a turnserver.conf, sustituye los valores y móntalo en el
+# contenedor si prefieres archivo en lugar de flags (ver docker-compose.yml).
+#
+# Las credenciales NUNCA se escriben aquí en claro en producción:
+# se inyectan por variables de entorno / gestor de secretos.
+
+# Puerto estándar STUN/TURN.
+listening-port=3478
+
+# Rango de puertos UDP para los relays de medios.
+min-port=49160
+max-port=49200
+
+# Dominio/realm del servidor (usa tu dominio real en producción).
+realm=videochat.local
+
+# Autenticación de larga duración con usuario estático.
+# Formato: usuario:contraseña — usa los valores de TURN_USER / TURN_PASSWORD.
+lt-cred-mech
+user=videochat:CAMBIA_ESTA_CONTRASENA
+
+# Fingerprint en mensajes STUN (requerido por WebRTC).
+fingerprint
+
+# En producción detrás de NAT: descomenta y pon la IP pública del servidor.
+# external-ip=IP_PUBLICA_DEL_SERVIDOR
+
+# TLS para TURNS (recomendado en producción, puerto 5349):
+# tls-listening-port=5349
+# cert=/etc/coturn/cert.pem
+# pkey=/etc/coturn/privkey.pem
+
+# Higiene básica.
+no-cli
+no-multicast-peers
+log-file=stdout
