@@ -39,6 +39,8 @@ services:
       TERMINOS_PROHIBIDOS: ${TERMINOS_PROHIBIDOS:-}
       RATE_MATCHES_POR_MINUTO: ${RATE_MATCHES_POR_MINUTO:-20}
       RATE_MENSAJES_POR_SEGUNDO: ${RATE_MENSAJES_POR_SEGUNDO:-5}
+      # Detector NSFW automático: off | aviso | auto (ver .env.example).
+      MODERACION_NSFW: ${MODERACION_NSFW:-aviso}
     ports:
       - '4000:4000'
     depends_on:

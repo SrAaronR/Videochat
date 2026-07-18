@@ -108,6 +108,17 @@ const INTERVALO_PASO_MS = 2_000;
 /** Cuántos matches recientes no se repiten. */
 const MAX_HISTORIAL = 3;
 
+/**
+ * Política del detector NSFW automático (muestreo del video local del cliente):
+ *  - 'off':   se ignora por completo (sin aviso ni baneo). Útil en pruebas.
+ *  - 'aviso': avisa al usuario y guarda evidencia para revisión humana, pero
+ *             NUNCA banea de forma automática (por defecto — el ML de cliente
+ *             da falsos positivos y no es fiable para expulsar por sí solo).
+ *  - 'auto':  comportamiento estricto de la especificación (1.er aviso,
+ *             reincidencia → denuncia automática + ban temporal).
+ */
+const MODO_NSFW = (process.env.MODERACION_NSFW ?? 'aviso').toLowerCase();
+
 const MODOS: ModoChat[] = ['video', 'texto'];
 
 const redis = new Redis(REDIS_URL);
@@ -624,9 +635,10 @@ io.on('connection', (socket: SocketChat) => {
     });
   });
 
-  // Alerta del detector NSFW del cliente (video local del propio usuario):
-  // 1.er strike → aviso; 2.º strike en una hora → ban temporal + denuncia auto.
+  // Alerta del detector NSFW del cliente (video local del propio usuario).
+  // El comportamiento depende de MODO_NSFW (off / aviso / auto).
   socket.on('nsfw_alerta', (bruto) => {
+    if (MODO_NSFW === 'off') return; // Detector desactivado en servidor.
     void (async () => {
       const payload = (typeof bruto === 'object' && bruto !== null ? bruto : {}) as Partial<PayloadAlertaNsfw>;
       const permitido = await dentroDelLimite(
@@ -634,11 +646,25 @@ io.on('connection', (socket: SocketChat) => {
       );
       if (!permitido) return;
 
+      // Modo 'aviso' (por defecto): informa y guarda evidencia para el panel,
+      // pero no banea automáticamente (los falsos positivos del modelo de
+      // cliente hacen que el auto-ban expulse a usuarios legítimos).
+      if (MODO_NSFW !== 'auto') {
+        socket.emit('aviso_moderacion', {
+          tipo: 'nsfw',
+          mensaje:
+            'Se ha detectado posible contenido inapropiado en tu cámara. Recuerda las normas de la comunidad.',
+        });
+        await guardarDenuncia(socket, null, 'nsfw-auto', 'nsfw-auto', decodificarFrame(payload.frame));
+        return;
+      }
+
+      // Modo 'auto' (estricto, como la especificación): 1.er aviso;
+      // reincidencia → denuncia automática + ban temporal + desconexión.
       const strikes = await registrarStrikeNsfw(
         redis,
         socket.data.fingerprint ?? socket.data.ipHash,
       );
-
       if (strikes === 1) {
         socket.emit('aviso_moderacion', {
           tipo: 'nsfw',
@@ -647,8 +673,6 @@ io.on('connection', (socket: SocketChat) => {
         });
         return;
       }
-
-      // Reincidencia: evidencia + ban escalado + desconexión.
       await guardarDenuncia(socket, null, 'nsfw-auto', 'nsfw-auto', decodificarFrame(payload.frame));
       await banearSocket(socket, 'Contenido inapropiado detectado por el sistema automático');
     })().catch((err) => console.error('[moderacion] error en nsfw_alerta:', err));
