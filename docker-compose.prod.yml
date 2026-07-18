@@ -1,0 +1,50 @@
+# Override de PRODUCCIÓN. Se usa junto al compose base:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Añade el proxy inverso Caddy (HTTPS/WSS automático con Let's Encrypt),
+# deja web y signaling accesibles solo desde localhost (todo el tráfico
+# entra por Caddy) y configura la IP pública del TURN.
+# Lo genera/usa el script deploy/instalar-vps.sh.
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - signaling
+    restart: unless-stopped
+
+  web:
+    # Solo accesible a través de Caddy.
+    ports: !override
+      - '127.0.0.1:3000:3000'
+
+  signaling:
+    ports: !override
+      - '127.0.0.1:4000:4000'
+
+  coturn:
+    # Igual que en el compose base + external-ip (obligatorio detrás de NAT
+    # o cuando la IP pública no está asignada a la interfaz del contenedor).
+    command: >-
+      -n
+      --listening-port=3478
+      --min-port=49160 --max-port=49200
+      --realm=${TURN_REALM:-videochat.local}
+      --user=${TURN_USER:-videochat}:${TURN_PASSWORD:?Define TURN_PASSWORD en .env}
+      --lt-cred-mech
+      --fingerprint
+      --no-cli
+      --log-file=stdout
+      --external-ip=${TURN_EXTERNAL_IP:?Define TURN_EXTERNAL_IP en .env}
+
+volumes:
+  caddy_data:
+  caddy_config:
