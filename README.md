@@ -4,15 +4,12 @@ Plataforma web de videochat y chat de texto aleatorio 1 contra 1, con
 moderación integrada. Especificación completa en
 [`prompt-clon-videochat.md`](./prompt-clon-videochat.md).
 
-**Estado actual: Fase 4 completada** — moderación completa: denuncias con
-captura de frame guardadas en PostgreSQL (Prisma), detector NSFW en cliente
-(modelo NSFWJS autoalojado + TensorFlow.js) con aviso al primer strike y
-ban a la reincidencia, baneos escalados (15 min → 24 h → 7 días →
-permanente) por IP hasheada + fingerprint, filtro de texto (términos
-prohibidos y datos personales), panel de administración en `/admin` con
-JWT y rate limiting por IP.
-(Fases 1-3: monorepo, docker-compose, señalización, WebRTC completo,
-matchmaking por intereses/país y modo solo texto.)
+**Estado actual: MVP completo (Fases 1-5)** —
+señalización + matchmaking (intereses, país, anti-repetición), WebRTC
+completo con TURN de respaldo, modo solo texto, moderación completa
+(denuncias con frame, detector NSFW, baneos escalados, filtro de texto,
+panel `/admin`, rate limiting), landing con gate 18+/Términos, páginas
+legales y [guía de despliegue en VPS](docs/despliegue-vps.md).
 
 ## Estructura del monorepo
 
@@ -21,14 +18,16 @@ matchmaking por intereses/país y modo solo texto.)
 ├── apps/
 │   ├── web/                  # Frontend Next.js 14 (App Router) + Tailwind
 │   │   ├── app/
-│   │   │   ├── page.tsx      # Landing: modo, intereses y filtro de país
+│   │   │   ├── page.tsx      # Landing: propuesta de valor + gate 18+ + criterios
 │   │   │   ├── chat/page.tsx # Sala (video o solo texto) + swipe móvil
-│   │   │   └── admin/page.tsx# Panel de moderación (denuncias/baneos/métricas)
-│   │   ├── components/PanelChat.tsx
+│   │   │   ├── admin/page.tsx# Panel de moderación (denuncias/baneos/métricas)
+│   │   │   ├── terminos/ · privacidad/ · normas/   # Páginas legales (borrador)
+│   │   ├── components/PanelChat.tsx · PaginaLegal.tsx
 │   │   ├── lib/webrtc.ts     # Servidores ICE (STUN/TURN) y restricciones
 │   │   ├── lib/paises.ts     # Lista de países del filtro
 │   │   ├── lib/identidad.ts  # Fingerprint del navegador (FingerprintJS)
 │   │   ├── lib/moderacion.ts # Captura de frames + muestreo NSFW (tfjs)
+│   │   ├── lib/aceptacion.ts # Gate 18+/Términos en localStorage
 │   │   ├── public/modelos/nsfw/  # Modelo NSFWJS mobilenet_v2 (MIT, 2,7 MB)
 │   │   └── Dockerfile
 │   └── signaling/            # Node + Socket.IO + Redis + Prisma
@@ -41,6 +40,8 @@ matchmaking por intereses/país y modo solo texto.)
 │   └── shared/               # Contrato de eventos Socket.IO (TypeScript)
 ├── docker/
 │   └── coturn/turnserver.conf.example
+├── deploy/Caddyfile.example  # Proxy inverso HTTPS para producción
+├── docs/despliegue-vps.md    # Guía paso a paso de despliegue con HTTPS/WSS
 ├── docker-compose.yml        # web + signaling + redis + postgres + coturn
 ├── .env.example
 └── package.json              # npm workspaces
@@ -51,7 +52,7 @@ matchmaking por intereses/país y modo solo texto.)
 - Node.js ≥ 20 y npm ≥ 10 (para desarrollo local), o
 - Docker + Docker Compose (para levantar todo el stack).
 
-## Cómo probar (Fases 1-4)
+## Cómo probar
 
 ### Opción A: con Docker Compose
 
@@ -89,9 +90,25 @@ Abre **http://localhost:3000** en dos pestañas y entra al chat en ambas.
 > (guía de despliegue en la Fase 5). Para probar en una sola máquina con
 > dos pestañas, `localhost` es suficiente.
 
+### Despliegue en producción
+
+Para publicarla en un VPS con dominio, HTTPS/WSS y TURN operativo (y poder
+probarla desde un móvil real), sigue la guía paso a paso:
+[**docs/despliegue-vps.md**](docs/despliegue-vps.md).
+
 ### Qué comprobar
 
-**Landing y matchmaking (Fase 3):**
+**Landing, gate 18+ y páginas legales (Fase 5):**
+
+0. La landing muestra la propuesta de valor y NO deja entrar sin marcar la
+   casilla de 18+ y aceptación de Términos (aviso en rojo). El acceso
+   directo a `/chat` sin aceptación muestra el gate "Antes de continuar" y
+   no abre ninguna conexión con el servidor. La aceptación se guarda en
+   localStorage con timestamp y versión de los términos; las páginas
+   `/terminos`, `/privacidad` y `/normas` son borradores marcados como
+   "revisar con abogado" y están enlazadas en el footer.
+
+**Matchmaking (Fase 3):**
 
 1. La landing permite elegir modo (Video / Solo texto), intereses separados
    por comas y país del desconocido; las preferencias se recuerdan.
@@ -212,7 +229,11 @@ Documentadas en [`.env.example`](./.env.example). Las relevantes en Fase 1:
   cuando el proyecto se estabilice.
 - Sin renegociación WebRTC (p. ej. cambiar de cámara a mitad de llamada):
   cada match crea una conexión nueva.
-- Sin gate 18+/Términos ni páginas legales — Fase 5.
-- Sin tests automatizados en el repo (las Fases 1-4 se verificaron con
+- Los **textos legales son borradores** generados para el MVP: deben
+  revisarse con un abogado antes del lanzamiento (protección de datos,
+  menores, jurisdicción y correo de contacto pendientes).
+- El gate 18+ es declarativo (checkbox): la verificación de edad robusta
+  queda fuera del alcance del MVP.
+- Sin tests automatizados en el repo (las Fases 1-5 se verificaron con
   pruebas E2E de Socket.IO y de navegador con media falsa); añadir
   Vitest + Playwright.

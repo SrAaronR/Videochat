@@ -1,0 +1,11 @@
+# Proxy inverso con HTTPS automático (Let's Encrypt) para producción.
+# Copia este archivo a deploy/Caddyfile y sustituye tudominio.com.
+# Caddy gestiona también los WebSockets de Socket.IO sin config extra.
+
+app.tudominio.com {
+	reverse_proxy web:3000
+}
+
+senal.tudominio.com {
+	reverse_proxy signaling:4000
+}

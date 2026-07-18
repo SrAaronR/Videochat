@@ -15,6 +15,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { io, type Socket } from 'socket.io-client';
 import {
@@ -28,6 +29,7 @@ import {
   type SignalPayload,
 } from '@videochat/shared';
 import PanelChat, { type MensajeUI } from '@/components/PanelChat';
+import { estaAceptado, guardarAceptacion } from '@/lib/aceptacion';
 import { obtenerFingerprint } from '@/lib/identidad';
 import { capturarFrame, iniciarMuestreoNsfw } from '@/lib/moderacion';
 import { nombrePais } from '@/lib/paises';
@@ -89,8 +91,15 @@ export default function PaginaChat() {
 
   // Los criterios se leen en cliente (querystring); hasta entonces no se renderiza la sala.
   const [criterios, setCriterios] = useState<CriteriosBusqueda | null>(null);
+  /**
+   * Gate legal: null = comprobando, false = sin aceptación registrada
+   * (se muestra el gate y NO se conecta), true = puede conectar.
+   */
+  const [aceptado, setAceptado] = useState<boolean | null>(null);
+  const [checkGate, setCheckGate] = useState(false);
   useEffect(() => {
     setCriterios(parsearCriterios(window.location.search));
+    setAceptado(estaAceptado());
   }, []);
 
   // --- Estado de UI ---
@@ -286,8 +295,9 @@ export default function PaginaChat() {
   );
 
   // --- Arranque: (video) cámara/micro primero; luego socket y matchmaking ---
+  // Solo se ejecuta con la aceptación legal registrada (gate de la Fase 5).
   useEffect(() => {
-    if (!criterios) return;
+    if (!criterios || aceptado !== true) return;
     let cancelado = false;
     let socket: SocketCliente | null = null;
     let pararMuestreoNsfw: (() => void) | null = null;
@@ -464,7 +474,7 @@ export default function PaginaChat() {
         streamLocalRef.current = null;
       }
     };
-  }, [criterios, buscarDeNuevo, cambiarEstado, crearPeerConnection, limpiarPeerConnection, mostrarBanner, procesarSignal]);
+  }, [criterios, aceptado, buscarDeNuevo, cambiarEstado, crearPeerConnection, limpiarPeerConnection, mostrarBanner, procesarSignal]);
 
   /** Envía la denuncia con una captura del video remoto (si lo hay). */
   const denunciar = useCallback((motivo: MotivoDenuncia) => {
@@ -669,10 +679,60 @@ export default function PaginaChat() {
     );
   }
 
-  if (!criterios) {
+  if (!criterios || aceptado === null) {
     return (
       <main className="flex min-h-dvh items-center justify-center">
         <p className="text-slate-400">Cargando…</p>
+      </main>
+    );
+  }
+
+  // Gate legal: acceso directo a /chat sin aceptación registrada.
+  if (aceptado === false) {
+    return (
+      <main className="flex min-h-dvh flex-col items-center justify-center gap-5 px-6 text-center">
+        <h1 className="text-2xl font-bold">Antes de continuar</h1>
+        <p className="max-w-md text-slate-400">
+          Este servicio es solo para mayores de 18 años. Necesitamos tu
+          confirmación y la aceptación de los términos para conectarte.
+        </p>
+        <label className="flex max-w-md cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-900 p-3 text-left text-sm">
+          <input
+            type="checkbox"
+            checked={checkGate}
+            onChange={(e) => setCheckGate(e.target.checked)}
+            className="mt-0.5 h-4 w-4 accent-indigo-500"
+          />
+          <span className="text-slate-300">
+            Confirmo que tengo <strong>18 años o más</strong> y acepto los{' '}
+            <Link href="/terminos" className="text-indigo-400 underline hover:text-indigo-300">Términos</Link>,{' '}
+            la <Link href="/privacidad" className="text-indigo-400 underline hover:text-indigo-300">Privacidad</Link>{' '}
+            y las <Link href="/normas" className="text-indigo-400 underline hover:text-indigo-300">Normas</Link>.
+          </span>
+        </label>
+        <div className="flex flex-wrap justify-center gap-3">
+          <button
+            onClick={() => {
+              if (!checkGate) return;
+              guardarAceptacion();
+              setAceptado(true);
+            }}
+            aria-disabled={!checkGate}
+            className={`rounded-xl px-6 py-3 font-semibold transition ${
+              checkGate
+                ? 'bg-indigo-500 hover:bg-indigo-400'
+                : 'cursor-not-allowed bg-slate-700 text-slate-400'
+            }`}
+          >
+            Aceptar y continuar
+          </button>
+          <button
+            onClick={() => router.push('/')}
+            className="rounded-xl bg-slate-700 px-6 py-3 font-semibold transition hover:bg-slate-600"
+          >
+            Volver
+          </button>
+        </div>
       </main>
     );
   }
