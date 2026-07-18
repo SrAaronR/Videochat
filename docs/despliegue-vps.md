@@ -2,7 +2,25 @@
 
 Objetivo: dejar la plataforma funcionando en un VPS con dominio propio,
 accesible desde móviles reales (los navegadores solo dan acceso a la
-cámara bajo HTTPS). Tiempo estimado: 30-45 minutos.
+cámara bajo HTTPS).
+
+## Opción rápida: script automático (~10 minutos)
+
+Con el DNS del paso 1 ya configurado, en el VPS (como root):
+
+```bash
+git clone <URL_DEL_REPO> videochat && cd videochat
+sudo bash deploy/instalar-vps.sh tudominio.com
+```
+
+El script instala Docker si falta, genera todas las contraseñas (quedan en
+`.env`, incluida la del panel de admin, que imprime al final), escribe el
+Caddyfile con tus dominios, abre el firewall y levanta todo con
+`docker-compose.prod.yml` (Caddy + HTTPS automático + coturn con IP
+pública). Al terminar: `https://app.tudominio.com`.
+
+El resto de esta guía explica los mismos pasos a mano, por si prefieres
+controlarlos uno a uno o algo falla.
 
 ## 0. Qué necesitas
 
@@ -60,39 +78,18 @@ VENTANA_INTERESES_MS=15000
 
 ## 3. Proxy inverso con HTTPS automático (Caddy)
 
-Caddy emite y renueva los certificados de Let's Encrypt solo. Copia
+Todo esto ya está preparado en
+[`docker-compose.prod.yml`](../docker-compose.prod.yml): añade el servicio
+Caddy (que emite y renueva los certificados de Let's Encrypt solo), deja
+`web` y `signaling` accesibles únicamente desde localhost y añade la IP
+pública al coturn. Solo necesitas el Caddyfile con tus dominios: copia
 [`deploy/Caddyfile.example`](../deploy/Caddyfile.example) a
-`deploy/Caddyfile`, sustituye `tudominio.com`, y añade este servicio al
-`docker-compose.yml`:
-
-```yaml
-  caddy:
-    image: caddy:2-alpine
-    ports:
-      - '80:80'
-      - '443:443'
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-    depends_on:
-      - web
-      - signaling
-    restart: unless-stopped
-```
-
-Y `caddy_data:` a la sección `volumes:`. Después, en los servicios `web` y
-`signaling` puedes eliminar la sección `ports:` (el tráfico entra solo por
-Caddy; coturn sí necesita sus puertos publicados).
+`deploy/Caddyfile` y sustituye `tudominio.com`.
 
 ## 4. coturn en producción
 
-En `docker-compose.yml`, añade la IP pública al comando de coturn:
-
-```
-      --external-ip=IP_PUBLICA_DEL_VPS
-```
-
-(Con IP dinámica o detrás de NAT: `--external-ip='$(detect-external-ip)'`.)
+`docker-compose.prod.yml` pasa `--external-ip=${TURN_EXTERNAL_IP}` al
+coturn: pon la IP pública del VPS en esa variable del `.env`.
 Para TURN sobre TLS (5349, recomendado porque algunos firewalls corporativos
 solo dejan salir TLS), monta los certificados que Caddy guarda en su volumen
 o usa certbot aparte — ver `docker/coturn/turnserver.conf.example`.
@@ -111,9 +108,10 @@ ufw enable
 ## 6. Arrancar
 
 ```bash
-docker compose build
-docker compose up -d
-docker compose logs -f signaling   # debe aplicar migraciones y escuchar en :4000
+docker compose -f docker-compose.yml -f docker-compose.prod.yml build
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.prod.yml logs -f signaling
+# debe aplicar migraciones y escuchar en :4000
 ```
 
 Comprobaciones:

@@ -90,11 +90,19 @@ Abre **http://localhost:3000** en dos pestañas y entra al chat en ambas.
 > (guía de despliegue en la Fase 5). Para probar en una sola máquina con
 > dos pestañas, `localhost` es suficiente.
 
-### Despliegue en producción
+### Despliegue en producción (un comando)
 
-Para publicarla en un VPS con dominio, HTTPS/WSS y TURN operativo (y poder
-probarla desde un móvil real), sigue la guía paso a paso:
-[**docs/despliegue-vps.md**](docs/despliegue-vps.md).
+Con un VPS Ubuntu y un dominio con los registros DNS `app.`, `senal.` y
+`turn.` apuntando a su IP:
+
+```bash
+git clone <URL_DEL_REPO> videochat && cd videochat
+sudo bash deploy/instalar-vps.sh tudominio.com
+```
+
+El script genera las contraseñas, configura Caddy (HTTPS/WSS automático),
+el firewall y el TURN, y deja la web en `https://app.tudominio.com`.
+Guía completa y paso a paso manual: [**docs/despliegue-vps.md**](docs/despliegue-vps.md).
 
 ### Qué comprobar
 
