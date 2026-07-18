@@ -14,6 +14,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { ModoChat } from '@videochat/shared';
 import { estaAceptado, guardarAceptacion } from '@/lib/aceptacion';
+import { Logo } from '@/components/Logo';
 import { PAISES } from '@/lib/paises';
 
 const CLAVE_PREFERENCIAS = 'videochat.preferencias';
@@ -88,15 +89,18 @@ export default function PaginaInicio() {
   return (
     <div className="flex min-h-dvh flex-col">
       <main className="flex flex-1 flex-col items-center gap-10 px-4 py-12 text-center">
+        {/* Marca */}
+        <Logo tamano="lg" />
+
         {/* Propuesta de valor */}
         <div className="space-y-3">
           <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">
-            Habla con desconocidos
-            <span className="block text-indigo-400">al azar, cara a cara</span>
+            ¿Aburrido? Habla con
+            <span className="block text-indigo-400">desconocidos al azar</span>
           </h1>
           <p className="mx-auto max-w-md text-slate-400">
-            Videochat y chat de texto 1 contra 1 con personas de todo el
-            mundo. Sin registro, sin descargas: pulsa y conversa.
+            BoredChat te empareja por vídeo o texto, 1 contra 1, con personas
+            de todo el mundo. Sin registro, sin descargas: pulsa y conversa.
           </p>
         </div>
 

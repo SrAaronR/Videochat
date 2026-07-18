@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import PaginaLegal from '@/components/PaginaLegal';
 
-export const metadata: Metadata = { title: 'Normas de la comunidad — Videochat aleatorio' };
+export const metadata: Metadata = { title: 'Normas de la comunidad — BoredChat' };
 
 export default function PaginaNormas() {
   return (

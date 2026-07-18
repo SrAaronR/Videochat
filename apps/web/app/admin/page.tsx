@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { Logo } from '@/components/Logo';
 
 const URL_SIGNALING =
   process.env.NEXT_PUBLIC_SIGNALING_URL ?? 'http://localhost:4000';
@@ -224,7 +225,9 @@ export default function PaginaAdmin() {
   return (
     <main className="mx-auto max-w-5xl space-y-4 p-4">
       <header className="flex flex-wrap items-center justify-between gap-2">
-        <h1 className="text-xl font-bold">Moderación</h1>
+        <h1 className="flex items-center gap-2 text-xl font-bold">
+          <Logo tamano="sm" /> <span className="text-slate-400">· Moderación</span>
+        </h1>
         <div className="flex gap-2">
           <button onClick={() => setPestana('denuncias')} className={clasePestana(pestana === 'denuncias')}>
             Denuncias ({denuncias.length})

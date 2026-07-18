@@ -2,8 +2,8 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Videochat aleatorio',
-  description: 'Habla con desconocidos al azar: video y chat de texto 1 contra 1.',
+  title: 'BoredChat — videochat aleatorio',
+  description: '¿Aburrido? Habla con desconocidos al azar: vídeo y chat de texto 1 contra 1.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import PaginaLegal from '@/components/PaginaLegal';
 
-export const metadata: Metadata = { title: 'Política de Privacidad — Videochat aleatorio' };
+export const metadata: Metadata = { title: 'Política de Privacidad — BoredChat' };
 
 export default function PaginaPrivacidad() {
   return (

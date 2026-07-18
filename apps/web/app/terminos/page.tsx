@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import PaginaLegal from '@/components/PaginaLegal';
 
-export const metadata: Metadata = { title: 'Términos y Condiciones — Videochat aleatorio' };
+export const metadata: Metadata = { title: 'Términos y Condiciones — BoredChat' };
 
 export default function PaginaTerminos() {
   return (
