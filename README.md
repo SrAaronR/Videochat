@@ -4,12 +4,15 @@ Plataforma web de videochat y chat de texto aleatorio 1 contra 1, con
 moderación integrada. Especificación completa en
 [`prompt-clon-videochat.md`](./prompt-clon-videochat.md).
 
-**Estado actual: Fase 3 completada** — matchmaking por intereses con
-ventana de 15 s, anti-repetición de los últimos 3 matches, filtro opcional
-por país (geoip-lite), modo "Solo texto", landing con selector de
-modo/intereses/país y gesto de deslizar para "Siguiente" en móvil.
-(Fases 1-2: monorepo, docker-compose, señalización, chat de texto y WebRTC
-completo con TURN de respaldo.)
+**Estado actual: Fase 4 completada** — moderación completa: denuncias con
+captura de frame guardadas en PostgreSQL (Prisma), detector NSFW en cliente
+(modelo NSFWJS autoalojado + TensorFlow.js) con aviso al primer strike y
+ban a la reincidencia, baneos escalados (15 min → 24 h → 7 días →
+permanente) por IP hasheada + fingerprint, filtro de texto (términos
+prohibidos y datos personales), panel de administración en `/admin` con
+JWT y rate limiting por IP.
+(Fases 1-3: monorepo, docker-compose, señalización, WebRTC completo,
+matchmaking por intereses/país y modo solo texto.)
 
 ## Estructura del monorepo
 
@@ -19,13 +22,20 @@ completo con TURN de respaldo.)
 │   ├── web/                  # Frontend Next.js 14 (App Router) + Tailwind
 │   │   ├── app/
 │   │   │   ├── page.tsx      # Landing: modo, intereses y filtro de país
-│   │   │   └── chat/page.tsx # Sala (video o solo texto) + swipe móvil
+│   │   │   ├── chat/page.tsx # Sala (video o solo texto) + swipe móvil
+│   │   │   └── admin/page.tsx# Panel de moderación (denuncias/baneos/métricas)
 │   │   ├── components/PanelChat.tsx
 │   │   ├── lib/webrtc.ts     # Servidores ICE (STUN/TURN) y restricciones
 │   │   ├── lib/paises.ts     # Lista de países del filtro
+│   │   ├── lib/identidad.ts  # Fingerprint del navegador (FingerprintJS)
+│   │   ├── lib/moderacion.ts # Captura de frames + muestreo NSFW (tfjs)
+│   │   ├── public/modelos/nsfw/  # Modelo NSFWJS mobilenet_v2 (MIT, 2,7 MB)
 │   │   └── Dockerfile
-│   └── signaling/            # Node + Socket.IO + Redis
-│       ├── src/index.ts      # Matchmaking, relay de chat y de `signal`
+│   └── signaling/            # Node + Socket.IO + Redis + Prisma
+│       ├── src/index.ts      # Matchmaking, chat moderado, relay `signal`
+│       ├── src/moderacion.ts # Baneos, strikes, filtros, rate limit, métricas
+│       ├── src/admin.ts      # API del panel (JWT)
+│       ├── prisma/           # Esquema y migraciones (Denuncia, Ban)
 │       └── Dockerfile
 ├── packages/
 │   └── shared/               # Contrato de eventos Socket.IO (TypeScript)
@@ -41,7 +51,7 @@ completo con TURN de respaldo.)
 - Node.js ≥ 20 y npm ≥ 10 (para desarrollo local), o
 - Docker + Docker Compose (para levantar todo el stack).
 
-## Cómo probar (Fases 1-3)
+## Cómo probar (Fases 1-4)
 
 ### Opción A: con Docker Compose
 
@@ -58,11 +68,17 @@ Abre **http://localhost:3000** en DOS pestañas del navegador, pulsa
 ```bash
 npm install
 
-# Necesitas un Redis local. Con Docker:
+# Necesitas Redis y PostgreSQL locales. Con Docker:
 docker run --rm -p 6379:6379 redis:7-alpine
-# ...o con el binario del sistema: redis-server
+docker run --rm -p 5432:5432 -e POSTGRES_PASSWORD=videochat postgres:16-alpine
 
-# Arranca signaling (puerto 4000) y web (puerto 3000) en paralelo:
+# Crea las tablas de moderación (una vez):
+cd apps/signaling
+DATABASE_URL='postgresql://postgres:videochat@localhost:5432/postgres' npx prisma migrate dev
+cd ../..
+
+# Arranca signaling (puerto 4000) y web (puerto 3000) en paralelo
+# (exporta antes DATABASE_URL, ADMIN_PASSWORD y HASH_SALT — ver .env.example):
 npm run dev
 ```
 
@@ -102,13 +118,35 @@ Abre **http://localhost:3000** en dos pestañas y entra al chat en ambas.
    mismo equipo el audio se acopla: silencia el micro).
 9. El video local aparece en la esquina y se puede arrastrar (escritorio).
 10. El chat funciona durante la llamada: hora, autoscroll y "está escribiendo…".
-11. Controles: silenciar micro, apagar cámara, pantalla completa y Denunciar
-    (🚩) siempre visible (el envío al backend llega en la Fase 4).
-12. Cerrar una pestaña: la otra lo detecta, avisa y vuelve a buscar.
-13. Si el WebRTC no se establece en 10 s, se descarta el match y se busca
+11. Cerrar una pestaña: la otra lo detecta, avisa y vuelve a buscar.
+12. Si el WebRTC no se establece en 10 s, se descarta el match y se busca
     otra persona automáticamente.
-14. "Detener" vuelve a la landing y te saca de la cola.
-15. Salud del signaling: `curl http://localhost:4000/health` → `{"ok":true}`.
+13. "Detener" vuelve a la landing y te saca de la cola.
+14. Salud del signaling: `curl http://localhost:4000/health` → `{"ok":true}`.
+
+**Moderación (Fase 4):**
+
+15. Denuncia: pulsa 🚩, elige motivo → verás "Denuncia enviada". Entra en
+    **http://localhost:3000/admin** con `ADMIN_PASSWORD`: la denuncia
+    aparece en la cola con la captura del video del denunciado en < 3 s.
+16. Banear desde el panel: el denunciado ve al instante "Has sido
+    suspendido" con motivo y duración, y NO puede volver a entrar ni
+    abriendo otra pestaña (mismo fingerprint) ni cambiando de red durante
+    el ban (IP hasheada). Escalado: 15 min → 24 h → 7 días → permanente.
+    Desde la pestaña "Baneos" puedes levantarlo.
+17. Filtro de texto: intenta enviar un email o un teléfono en el chat: el
+    mensaje se bloquea con un aviso educativo y no le llega al otro.
+    Los términos de `TERMINOS_PROHIBIDOS` también se bloquean.
+18. Rate limiting: más de `RATE_MENSAJES_POR_SEGUNDO` mensajes por segundo
+    o más de `RATE_MATCHES_POR_MINUTO` búsquedas por minuto → aviso y se
+    ignoran los excesos.
+19. Detector NSFW: muestrea tu video local cada 7 s con el modelo
+    autoalojado. Al primer positivo verás el aviso amarillo; al segundo en
+    una hora, expulsión con ban temporal y denuncia automática con frame en
+    el panel. (Con la cámara falsa de pruebas no se dispara; se verificó
+    inyectando un clasificador de prueba.)
+20. Métricas en el panel: usuarios conectados, tamaño de las colas,
+    matches y denuncias por hora.
 
 ## Variables de entorno
 
@@ -124,7 +162,12 @@ Documentadas en [`.env.example`](./.env.example). Las relevantes en Fase 1:
 | `REDIS_URL` | Conexión a Redis del signaling (solo dev sin Docker). |
 | `PAIS_POR_DEFECTO` | País asumido si GeoIP no resuelve (solo desarrollo). |
 | `VENTANA_INTERESES_MS` | Ventana de match por intereses (15000 por defecto). |
-| `POSTGRES_*` | Declaradas para la Fase 4 (postgres levanta pero aún no se usa). |
+| `POSTGRES_*`, `DATABASE_URL` | PostgreSQL: denuncias y baneos (Prisma). |
+| `ADMIN_PASSWORD`, `ADMIN_JWT_SECRET` | Acceso y sesión del panel `/admin`. |
+| `HASH_SALT` | Sal del hash de IPs (nunca se guarda la IP en claro). |
+| `TERMINOS_PROHIBIDOS` | Términos bloqueados en el chat, separados por comas. |
+| `RATE_*` | Límites por IP: búsquedas/min, mensajes/s, denuncias/min. |
+| `NEXT_PUBLIC_NSFW_*` | Umbral, intervalo y URL del modelo del detector NSFW. |
 
 ## Decisiones de arquitectura
 
@@ -154,15 +197,22 @@ Documentadas en [`.env.example`](./.env.example). Las relevantes en Fase 1:
 - Las **credenciales TURN son estáticas** y viajan en el bundle del cliente;
   en producción deben ser efímeras (REST API de coturn, `use-auth-secret`)
   servidas desde el backend.
+- El **detector NSFW corre solo en el cliente** (puede desactivarlo un
+  usuario malicioso con devtools): el evento `nsfw_alerta` cumple el rol de
+  "verificación en servidor" guardando la evidencia y decidiendo el ban,
+  pero falta re-clasificar el frame en servidor (tfjs-node) para no confiar
+  en el veredicto del cliente.
+- Los **frames de denuncia se guardan en PostgreSQL** (bytea); con volumen
+  real conviene moverlos a almacenamiento de objetos con caducidad.
+- El filtro de términos es un `includes` simple: no detecta evasiones
+  (l33t, espacios); valorar una librería de normalización.
+- El fingerprint es la versión open-source de FingerprintJS (colisiones
+  posibles entre navegadores idénticos; suficiente para MVP).
 - El signaling se ejecuta con `tsx` en producción; migrar a build con `tsc`
   cuando el proyecto se estabilice.
-- La denuncia (🚩) es solo UI: la captura de frame y el registro en
-  PostgreSQL llegan en la Fase 4.
 - Sin renegociación WebRTC (p. ej. cambiar de cámara a mitad de llamada):
   cada match crea una conexión nueva.
-- Sin rate limiting, filtro de texto ni baneos — Fase 4.
 - Sin gate 18+/Términos ni páginas legales — Fase 5.
-- `postgres` levanta en compose pero aún no tiene consumidores.
-- Sin tests automatizados en el repo (las Fases 1-3 se verificaron con
+- Sin tests automatizados en el repo (las Fases 1-4 se verificaron con
   pruebas E2E de Socket.IO y de navegador con media falsa); añadir
   Vitest + Playwright.

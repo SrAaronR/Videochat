@@ -1,0 +1,61 @@
+// Esquema de moderación — Fase 4.
+// Redis lleva el estado "caliente" (baneos con TTL, strikes, rate limits);
+// PostgreSQL es el registro duradero: denuncias con su frame, historial de
+// baneos y baneos permanentes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Denuncia de un usuario (manual con motivo, o automática del detector NSFW).
+model Denuncia {
+  id        String   @id @default(uuid())
+  creadaEn  DateTime @default(now())
+
+  /// 'desnudez' | 'menor' | 'acoso' | 'spam' | 'otro' | 'nsfw-auto'
+  motivo    String
+  /// 'manual' (botón Denunciar) | 'nsfw-auto' (detector del cliente)
+  origen    String   @default("manual")
+
+  /// Ids de sesión (socket) de ambos usuarios en el momento de la denuncia.
+  sesionDenunciante String
+  sesionDenunciado  String
+  roomId            String?
+
+  /// Identidad del denunciado para poder banear desde el panel.
+  ipHashDenunciado       String?
+  fingerprintDenunciado  String?
+
+  /// Captura JPEG del video (bytes decodificados del data-URI), si la hubo.
+  frame     Bytes?
+
+  /// 'pendiente' | 'baneada' | 'descartada'
+  estado    String   @default("pendiente")
+
+  @@index([estado, creadaEn])
+}
+
+/// Registro histórico y fuente de verdad de baneos (Redis es la caché activa).
+model Ban {
+  id          String    @id @default(uuid())
+  creadoEn    DateTime  @default(now())
+
+  ipHash      String
+  fingerprint String
+  motivo      String
+  /// Nivel de escalado 1..4 (15 min, 24 h, 7 días, permanente).
+  nivel       Int
+  /// Fin del ban; null = permanente.
+  expiraEn    DateTime?
+  /// false si un administrador lo levantó manualmente.
+  activo      Boolean   @default(true)
+
+  @@index([activo, expiraEn])
+  @@index([fingerprint])
+  @@index([ipHash])
+}

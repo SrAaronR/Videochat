@@ -15,7 +15,11 @@ RUN npm ci --workspace apps/signaling --workspace packages/shared
 COPY packages/shared packages/shared
 COPY apps/signaling apps/signaling
 
+# Cliente Prisma para el esquema de moderación.
+RUN npx prisma generate --schema apps/signaling/prisma/schema.prisma
+
 ENV NODE_ENV=production
 EXPOSE 4000
 
-CMD ["npm", "start", "--workspace", "apps/signaling"]
+# Aplica las migraciones pendientes y arranca.
+CMD ["npm", "run", "start:docker", "--workspace", "apps/signaling"]

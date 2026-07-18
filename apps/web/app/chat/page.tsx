@@ -17,14 +17,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { io, type Socket } from 'socket.io-client';
-import type {
-  ClientToServerEvents,
-  CriteriosBusqueda,
-  EstadoChat,
-  ServerToClientEvents,
-  SignalPayload,
+import {
+  MOTIVOS_DENUNCIA,
+  type ClientToServerEvents,
+  type CriteriosBusqueda,
+  type EstadoChat,
+  type InfoBan,
+  type MotivoDenuncia,
+  type ServerToClientEvents,
+  type SignalPayload,
 } from '@videochat/shared';
 import PanelChat, { type MensajeUI } from '@/components/PanelChat';
+import { obtenerFingerprint } from '@/lib/identidad';
+import { capturarFrame, iniciarMuestreoNsfw } from '@/lib/moderacion';
 import { nombrePais } from '@/lib/paises';
 import {
   crearConfiguracionRtc,
@@ -54,7 +59,11 @@ interface InfoMatch {
   paisPeer: string | null;
 }
 
-const MOTIVOS_DENUNCIA = ['Desnudez', 'Menor de edad', 'Acoso', 'Spam', 'Otro'];
+/** Aviso no fatal en pantalla (moderación, confirmaciones). */
+interface Banner {
+  tono: 'aviso' | 'ok';
+  texto: string;
+}
 
 /** Desplazamiento mínimo (px) para que un deslizamiento cuente como "Siguiente". */
 const UMBRAL_SWIPE_PX = 80;
@@ -95,6 +104,10 @@ export default function PaginaChat() {
   const [micActivo, setMicActivo] = useState(true);
   const [camaraActiva, setCamaraActiva] = useState(true);
   const [denunciaAbierta, setDenunciaAbierta] = useState(false);
+  /** Suspensión activa: sustituye toda la UI por la pantalla de ban. */
+  const [baneo, setBaneo] = useState<InfoBan | null>(null);
+  /** Banner de moderación (aviso NSFW, mensaje bloqueado, confirmaciones). */
+  const [banner, setBanner] = useState<Banner | null>(null);
   /** Posición del video local tras arrastrarlo (null = esquina por defecto). */
   const [posLocal, setPosLocal] = useState<{ x: number; y: number } | null>(null);
 
@@ -113,12 +126,20 @@ export default function PaginaChat() {
   const timeoutEscribiendoRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrastreRef = useRef<{ dx: number; dy: number } | null>(null);
   const inicioSwipeRef = useRef<{ x: number; y: number } | null>(null);
+  const timeoutBannerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const modoTexto = criterios?.modo === 'texto';
 
   const cambiarEstado = useCallback((nuevo: EstadoChat) => {
     estadoRef.current = nuevo;
     setEstado(nuevo);
+  }, []);
+
+  /** Muestra un banner temporal de moderación (se autooculta a los 8 s). */
+  const mostrarBanner = useCallback((nuevo: Banner) => {
+    setBanner(nuevo);
+    if (timeoutBannerRef.current) clearTimeout(timeoutBannerRef.current);
+    timeoutBannerRef.current = setTimeout(() => setBanner(null), 8000);
   }, []);
 
   /** Cierra la RTCPeerConnection actual y limpia timers/estado asociado. */
@@ -269,6 +290,7 @@ export default function PaginaChat() {
     if (!criterios) return;
     let cancelado = false;
     let socket: SocketCliente | null = null;
+    let pararMuestreoNsfw: (() => void) | null = null;
     const esTexto = criterios.modo === 'texto';
 
     async function iniciar() {
@@ -295,11 +317,17 @@ export default function PaginaChat() {
         setEstadoMedia('ok');
       }
 
-      // 2) Socket de señalización (reconexión automática con backoff).
+      // 2) Identidad para moderación: los baneos se aplican por IP hasheada
+      // (en servidor) + este fingerprint del navegador.
+      const fingerprint = await obtenerFingerprint();
+      if (cancelado) return;
+
+      // 3) Socket de señalización (reconexión automática con backoff).
       socket = io(URL_SIGNALING, {
         transports: ['websocket', 'polling'],
         reconnectionDelay: 1000,
         reconnectionDelayMax: 10000,
+        auth: { fingerprint },
       });
       socketRef.current = socket;
 
@@ -309,9 +337,41 @@ export default function PaginaChat() {
         socket?.emit('find_match', criterios!);
       });
 
-      socket.on('connect_error', () => {
+      socket.on('connect_error', (err) => {
+        // El gate de baneos rechaza la conexión con message='baneado'.
+        if (err.message === 'baneado') {
+          const info = (err as Error & { data?: InfoBan }).data;
+          setBaneo(info ?? { motivo: 'Suspensión activa', hasta: null });
+          socket?.disconnect();
+          return;
+        }
         setAviso('No se pudo conectar con el servidor. Reintentando…');
       });
+
+      // Ban aplicado en caliente (reincidencia NSFW o acción del admin).
+      socket.on('baneado', (info) => {
+        setBaneo(info);
+        cambiarEstado('inactivo');
+      });
+
+      socket.on('aviso_moderacion', (avisoMod) => {
+        mostrarBanner({ tono: 'aviso', texto: avisoMod.mensaje });
+      });
+
+      socket.on('denuncia_recibida', () => {
+        mostrarBanner({ tono: 'ok', texto: 'Denuncia enviada. Gracias por ayudar a mantener la comunidad segura.' });
+      });
+
+      // 4) Muestreo NSFW del video local (solo modo video): si supera el
+      // umbral, el servidor decide (primer aviso; reincidencia → ban).
+      if (!esTexto && videoLocalRef.current) {
+        pararMuestreoNsfw = iniciarMuestreoNsfw({
+          video: videoLocalRef.current,
+          alSuperarUmbral: (frame, puntuaciones) => {
+            socket?.emit('nsfw_alerta', { frame, puntuaciones });
+          },
+        });
+      }
 
       // Si el socket cae a mitad de llamada, el servidor ya habrá avisado
       // al peer; aquí limpiamos y esperamos la reconexión automática.
@@ -391,8 +451,10 @@ export default function PaginaChat() {
 
     return () => {
       cancelado = true;
+      pararMuestreoNsfw?.();
       if (timeoutRebusquedaRef.current) clearTimeout(timeoutRebusquedaRef.current);
       if (timeoutEscribiendoRef.current) clearTimeout(timeoutEscribiendoRef.current);
+      if (timeoutBannerRef.current) clearTimeout(timeoutBannerRef.current);
       limpiarPeerConnection();
       socket?.disconnect();
       socketRef.current = null;
@@ -402,7 +464,14 @@ export default function PaginaChat() {
         streamLocalRef.current = null;
       }
     };
-  }, [criterios, buscarDeNuevo, cambiarEstado, crearPeerConnection, limpiarPeerConnection, procesarSignal]);
+  }, [criterios, buscarDeNuevo, cambiarEstado, crearPeerConnection, limpiarPeerConnection, mostrarBanner, procesarSignal]);
+
+  /** Envía la denuncia con una captura del video remoto (si lo hay). */
+  const denunciar = useCallback((motivo: MotivoDenuncia) => {
+    setDenunciaAbierta(false);
+    const frame = capturarFrame(videoRemotoRef.current);
+    socketRef.current?.emit('denunciar', { motivo, frame });
+  }, []);
 
   // --- Acciones de usuario ---
 
@@ -536,22 +605,21 @@ export default function PaginaChat() {
       <div className="w-full max-w-sm space-y-3 rounded-2xl bg-slate-900 p-5">
         <h2 className="text-lg font-bold">Denunciar al desconocido</h2>
         <p className="text-sm text-slate-400">
-          Selecciona el motivo. El registro de denuncias en el servidor se
-          activa en la Fase 4.
+          Selecciona el motivo. Se enviará una captura del video del
+          desconocido al equipo de moderación.
         </p>
         <div className="space-y-2">
-          {MOTIVOS_DENUNCIA.map((motivo) => (
-            <button
-              key={motivo}
-              onClick={() => {
-                setDenunciaAbierta(false);
-                setAviso('Gracias. La denuncia se procesará cuando la moderación esté activa (Fase 4).');
-              }}
-              className="block w-full rounded-lg bg-slate-800 px-3 py-2 text-left text-sm transition hover:bg-slate-700"
-            >
-              {motivo}
-            </button>
-          ))}
+          {(Object.entries(MOTIVOS_DENUNCIA) as [MotivoDenuncia, string][]).map(
+            ([motivo, etiqueta]) => (
+              <button
+                key={motivo}
+                onClick={() => denunciar(motivo)}
+                className="block w-full rounded-lg bg-slate-800 px-3 py-2 text-left text-sm transition hover:bg-slate-700"
+              >
+                {etiqueta}
+              </button>
+            ),
+          )}
         </div>
         <button
           onClick={() => setDenunciaAbierta(false)}
@@ -563,7 +631,43 @@ export default function PaginaChat() {
     </div>
   ) : null;
 
+  const bannerJsx = banner ? (
+    <p
+      role="status"
+      className={`absolute left-1/2 top-14 z-20 w-max max-w-[90%] -translate-x-1/2 rounded-lg px-3 py-1.5 text-sm font-medium ${
+        banner.tono === 'ok' ? 'bg-emerald-600/90' : 'bg-amber-500/95 text-slate-950'
+      }`}
+    >
+      {banner.texto}
+    </p>
+  ) : null;
+
   // --- Pantallas especiales ---
+
+  // Suspensión: pantalla completa con motivo y duración, sin acceso al chat.
+  if (baneo) {
+    const hastaTexto = baneo.hasta
+      ? new Date(baneo.hasta).toLocaleString('es', { dateStyle: 'medium', timeStyle: 'short' })
+      : null;
+    return (
+      <main className="flex min-h-dvh flex-col items-center justify-center gap-4 px-6 text-center">
+        <span aria-hidden className="text-5xl">🚫</span>
+        <h1 className="text-2xl font-bold">Has sido suspendido</h1>
+        <p className="max-w-md text-slate-300">{baneo.motivo}</p>
+        <p className="max-w-md text-sm text-slate-400">
+          {hastaTexto
+            ? `La suspensión termina el ${hastaTexto}.`
+            : 'La suspensión es permanente.'}
+        </p>
+        <button
+          onClick={() => router.push('/')}
+          className="rounded-xl bg-slate-700 px-6 py-3 font-semibold transition hover:bg-slate-600"
+        >
+          Volver al inicio
+        </button>
+      </main>
+    );
+  }
 
   if (!criterios) {
     return (
@@ -659,6 +763,7 @@ export default function PaginaChat() {
             {aviso}
           </p>
         )}
+        {bannerJsx}
 
         <PanelChat
           expandido
@@ -727,6 +832,7 @@ export default function PaginaChat() {
             {aviso}
           </p>
         )}
+        {bannerJsx}
 
         {/* Video local en esquina, arrastrable */}
         <div

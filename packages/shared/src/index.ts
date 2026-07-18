@@ -104,6 +104,12 @@ export interface ServerToClientEvents {
   signal: (data: SignalPayload) => void;
   /** Error recuperable que la UI puede mostrar. */
   error_chat: (mensaje: string) => void;
+  /** El usuario ha sido suspendido; tras esto el servidor lo desconecta. */
+  baneado: (info: InfoBan) => void;
+  /** Aviso de moderación (primer strike NSFW, mensaje bloqueado…). */
+  aviso_moderacion: (aviso: AvisoModeracion) => void;
+  /** Confirmación de que la denuncia se registró. */
+  denuncia_recibida: () => void;
 }
 
 /** Eventos que el cliente emite hacia el servidor. */
@@ -120,7 +126,61 @@ export interface ClientToServerEvents {
   stop: () => void;
   /** Relay de señalización WebRTC (offer/answer/ICE). */
   signal: (data: SignalPayload) => void;
+  /** Denunciar al desconocido actual (con captura opcional). */
+  denunciar: (denuncia: PayloadDenuncia) => void;
+  /** El detector NSFW local superó el umbral (el servidor decide). */
+  nsfw_alerta: (alerta: PayloadAlertaNsfw) => void;
 }
 
 /** Longitud máxima de un mensaje de chat aceptada por el servidor. */
 export const MAX_LONGITUD_MENSAJE = 2000;
+
+// ---------------------------------------------------------------------------
+// Moderación (Fase 4)
+// ---------------------------------------------------------------------------
+
+/** Motivos seleccionables al denunciar. */
+export type MotivoDenuncia = 'desnudez' | 'menor' | 'acoso' | 'spam' | 'otro';
+
+/** Etiquetas legibles de los motivos de denuncia. */
+export const MOTIVOS_DENUNCIA: Record<MotivoDenuncia, string> = {
+  desnudez: 'Desnudez',
+  menor: 'Menor de edad',
+  acoso: 'Acoso',
+  spam: 'Spam',
+  otro: 'Otro',
+};
+
+/** Denuncia enviada por el cliente al servidor. */
+export interface PayloadDenuncia {
+  motivo: MotivoDenuncia;
+  /**
+   * Captura del video remoto como data-URI JPEG (`data:image/jpeg;base64,…`)
+   * o null en modo solo texto / cámara apagada.
+   */
+  frame: string | null;
+}
+
+/** Alerta del detector NSFW del cliente (muestreo del video LOCAL). */
+export interface PayloadAlertaNsfw {
+  /** Captura del video local que disparó el umbral (data-URI JPEG). */
+  frame: string | null;
+  /** Puntuaciones del clasificador, por etiqueta (0..1). */
+  puntuaciones: Record<string, number>;
+}
+
+/** Información de suspensión que recibe un usuario baneado. */
+export interface InfoBan {
+  motivo: string;
+  /** Fin del ban en ms epoch, o null si es permanente. */
+  hasta: number | null;
+}
+
+/** Aviso de moderación no fatal mostrado al usuario. */
+export interface AvisoModeracion {
+  tipo: 'nsfw' | 'texto';
+  mensaje: string;
+}
+
+/** Tamaño máximo aceptado para un frame de denuncia (data-URI completo). */
+export const MAX_BYTES_FRAME = 500 * 1024;

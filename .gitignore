@@ -19,3 +19,6 @@ npm-debug.log*
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
+
+# Persistencia local de Redis
+dump.rdb

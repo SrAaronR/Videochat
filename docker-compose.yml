@@ -32,10 +32,19 @@ services:
       PORT: 4000
       REDIS_URL: redis://redis:6379
       CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-videochat}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-videochat}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Define ADMIN_PASSWORD en .env}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET:-}
+      HASH_SALT: ${HASH_SALT:?Define HASH_SALT en .env}
+      TERMINOS_PROHIBIDOS: ${TERMINOS_PROHIBIDOS:-}
+      RATE_MATCHES_POR_MINUTO: ${RATE_MATCHES_POR_MINUTO:-20}
+      RATE_MENSAJES_POR_SEGUNDO: ${RATE_MENSAJES_POR_SEGUNDO:-5}
     ports:
       - '4000:4000'
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 

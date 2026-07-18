@@ -1,5 +1,5 @@
 /**
- * Servidor de señalización — Fases 1-3.
+ * Servidor de señalización — Fases 1-4.
  *
  * Responsabilidades:
  *  - Matchmaking con cola en Redis (un hash por modo video/texto):
@@ -7,9 +7,12 @@
  *      (b) pasado ese tiempo, match totalmente aleatorio;
  *      (c) nunca se empareja con los últimos 3 matches de la sesión;
  *      (d) filtro opcional por país (detectado por IP con geoip-lite).
- *  - Chat de texto retransmitido por el servidor (necesario para poder
- *    moderarlo en la Fase 4; nunca por data channel).
+ *  - Chat de texto retransmitido por el servidor, con filtro de términos
+ *    prohibidos y de datos personales (Fase 4).
  *  - Relay del evento `signal` (offer/answer/ICE) para WebRTC.
+ *  - Moderación: denuncias con frame a PostgreSQL, strikes NSFW, baneos
+ *    escalados por IP hasheada + fingerprint, rate limiting por IP y
+ *    panel de administración con JWT (ver moderacion.ts y admin.ts).
  *
  * Deuda técnica declarada (ver README): las salas activas y el historial de
  * matches viven en memoria, por lo que solo se soporta UNA instancia de este
@@ -18,21 +21,42 @@
  */
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import express from 'express';
+import cors from 'cors';
 import { Server, type Socket } from 'socket.io';
 import Redis from 'ioredis';
 import geoip from 'geoip-lite';
 import {
+  MAX_BYTES_FRAME,
   MAX_INTERESES,
   MAX_LONGITUD_INTERES,
   MAX_LONGITUD_MENSAJE,
+  MOTIVOS_DENUNCIA,
   TIPOS_SIGNAL,
   type ClientToServerEvents,
   type CriteriosBusqueda,
   type ModoChat,
+  type MotivoDenuncia,
   type MotivoSalida,
+  type PayloadAlertaNsfw,
+  type PayloadDenuncia,
   type ServerToClientEvents,
   type SignalPayload,
 } from '@videochat/shared';
+import { prisma } from './db.js';
+import {
+  LIMITES,
+  aplicarBan,
+  consultarBan,
+  dentroDelLimite,
+  evaluarTexto,
+  hashIp,
+  incrementarMetrica,
+  recargarBanesActivos,
+  registrarStrikeNsfw,
+  sanearFingerprint,
+} from './moderacion.js';
+import { crearRouterAdmin } from './admin.js';
 
 /** Datos que colgamos de cada socket conectado. */
 interface DatosSocket {
@@ -46,6 +70,10 @@ interface DatosSocket {
   pais: string | null;
   /** Ids de socket de los últimos matches (para no repetir). */
   historial: string[];
+  /** Hash irreversible de la IP (moderación y rate limiting). */
+  ipHash: string;
+  /** Fingerprint del navegador enviado por el cliente (o null). */
+  fingerprint: string | null;
 }
 
 type SocketChat = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, DatosSocket>;
@@ -85,19 +113,21 @@ const MODOS: ModoChat[] = ['video', 'texto'];
 const redis = new Redis(REDIS_URL);
 redis.on('error', (err) => console.error('[redis] error:', err.message));
 
-const httpServer = createServer((req, res) => {
-  // Endpoint de salud para docker-compose / monitorización.
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ok: true }));
-    return;
-  }
-  res.writeHead(404);
-  res.end();
+// --- HTTP: salud + API de administración ------------------------------------
+
+const app = express();
+app.use(cors({ origin: ORIGENES }));
+app.use(express.json({ limit: '1mb' }));
+app.get('/health', (_req, res) => {
+  res.json({ ok: true });
 });
+
+const httpServer = createServer(app);
 
 const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string, never>, DatosSocket>(httpServer, {
   cors: { origin: ORIGENES },
+  // Los frames de denuncia viajan como data-URI JPEG.
+  maxHttpBufferSize: MAX_BYTES_FRAME + 64 * 1024,
 });
 
 /** Salas activas en memoria (ver nota de deuda técnica en la cabecera). */
@@ -112,13 +142,19 @@ function claveCola(modo: ModoChat): string {
   return `cola:${modo}`;
 }
 
-/** Detecta el país del socket por su IP (cabecera de proxy o dirección directa). */
-function detectarPais(socket: SocketChat): string | null {
+/** IP real del socket (cabecera de proxy o dirección directa). */
+function ipDelSocket(socket: SocketChat): string {
   const xff = socket.handshake.headers['x-forwarded-for'];
-  const ip =
+  return (
     (typeof xff === 'string' ? xff.split(',')[0]?.trim() : undefined) ??
-    socket.handshake.address;
-  const resultado = ip ? geoip.lookup(ip) : null;
+    socket.handshake.address ??
+    'desconocida'
+  );
+}
+
+/** Detecta el país del socket por su IP. */
+function detectarPais(socket: SocketChat): string | null {
+  const resultado = geoip.lookup(ipDelSocket(socket));
   return resultado?.country ?? PAIS_POR_DEFECTO;
 }
 
@@ -202,6 +238,8 @@ function emparejar(entradaA: Esperando, entradaB: Esperando, modo: ModoChat): vo
     // Historial corto por sesión para la regla de no-repetición.
     socket.data.historial = [otro.id, ...socket.data.historial].slice(0, MAX_HISTORIAL);
   }
+
+  void incrementarMetrica(redis, 'matches');
 
   // El que más tiempo llevaba esperando (entradaA) es el initiator WebRTC.
   a.emit('match_found', {
@@ -301,6 +339,16 @@ async function pasoDeEmparejamiento(modo: ModoChat): Promise<void> {
 /** Encola al socket con sus criterios y dispara un paso inmediato. */
 async function encolar(socket: SocketChat, criterios: CriteriosBusqueda): Promise<void> {
   if (socket.data.roomId) return; // Ya está en una sala.
+
+  // Rate limit de búsquedas por IP (frena bots que hacen "Siguiente" en bucle).
+  const permitido = await dentroDelLimite(
+    redis, 'matches', socket.data.ipHash, LIMITES.matchesPorMinuto, 60,
+  );
+  if (!permitido) {
+    socket.emit('error_chat', 'Demasiadas búsquedas seguidas. Espera un momento.');
+    return;
+  }
+
   socket.data.criterios = criterios;
   socket.data.buscando = true;
 
@@ -383,8 +431,104 @@ async function salirDeCola(socket: SocketChat): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Moderación
+// ---------------------------------------------------------------------------
+
+/** Decodifica un data-URI JPEG a bytes, validando prefijo y tamaño. */
+function decodificarFrame(frame: unknown): Uint8Array<ArrayBuffer> | null {
+  if (typeof frame !== 'string') return null;
+  if (frame.length > MAX_BYTES_FRAME) return null;
+  const prefijo = 'data:image/jpeg;base64,';
+  if (!frame.startsWith(prefijo)) return null;
+  try {
+    // Copia a un Uint8Array plano (el tipo Bytes de Prisma no admite Buffer
+    // respaldado por SharedArrayBuffer).
+    return new Uint8Array(Buffer.from(frame.slice(prefijo.length), 'base64'));
+  } catch {
+    return null;
+  }
+}
+
+/** Banea al socket dado: registra, notifica y desconecta. */
+async function banearSocket(socket: SocketChat, motivo: string): Promise<void> {
+  const info = await aplicarBan(redis, socket.data.ipHash, socket.data.fingerprint, motivo);
+  desconectarBaneados(socket.data.ipHash, socket.data.fingerprint, info.motivo, info.hasta);
+}
+
+/**
+ * Desconecta en caliente todos los sockets que casen con la identidad
+ * recién baneada (todas las pestañas del mismo navegador o IP).
+ */
+function desconectarBaneados(
+  ipHash: string | null,
+  fingerprint: string | null,
+  motivo: string,
+  hasta: number | null,
+): void {
+  for (const [, generico] of io.sockets.sockets) {
+    const socket = generico as SocketChat;
+    const coincide =
+      (ipHash && socket.data.ipHash === ipHash) ||
+      (fingerprint && socket.data.fingerprint === fingerprint);
+    if (coincide) {
+      socket.emit('baneado', { motivo, hasta });
+      abandonarSala(socket, 'desconexion');
+      void salirDeCola(socket);
+      // Margen para que el evento llegue antes de cortar el socket.
+      setTimeout(() => socket.disconnect(true), 100);
+    }
+  }
+}
+
+/** Registra una denuncia (manual o automática) en PostgreSQL. */
+async function guardarDenuncia(
+  socket: SocketChat,
+  denunciado: SocketChat | null,
+  motivo: string,
+  origen: 'manual' | 'nsfw-auto',
+  frame: Uint8Array<ArrayBuffer> | null,
+): Promise<void> {
+  await prisma.denuncia.create({
+    data: {
+      motivo,
+      origen,
+      sesionDenunciante: socket.id,
+      sesionDenunciado: denunciado?.id ?? socket.id,
+      roomId: socket.data.roomId ?? null,
+      ipHashDenunciado: denunciado?.data.ipHash ?? socket.data.ipHash,
+      fingerprintDenunciado: denunciado?.data.fingerprint ?? socket.data.fingerprint,
+      frame,
+    },
+  });
+  void incrementarMetrica(redis, 'denuncias');
+}
+
+// ---------------------------------------------------------------------------
 // Conexiones
 // ---------------------------------------------------------------------------
+
+// Gate de baneos: se comprueba ANTES de aceptar la conexión. El cliente
+// recibe connect_error con message='baneado' y data={motivo, hasta}.
+io.use((generico, next) => {
+  const socket = generico as SocketChat;
+  socket.data.ipHash = hashIp(ipDelSocket(socket));
+  socket.data.fingerprint = sanearFingerprint(socket.handshake.auth?.fingerprint);
+
+  consultarBan(redis, socket.data.ipHash, socket.data.fingerprint)
+    .then((ban) => {
+      if (!ban) {
+        next();
+        return;
+      }
+      const err = new Error('baneado') as Error & { data?: unknown };
+      err.data = ban;
+      next(err);
+    })
+    .catch((e) => {
+      console.error('[moderacion] error consultando ban:', e);
+      next(); // Redis caído: no bloquear el servicio entero.
+    });
+});
 
 io.on('connection', (socket: SocketChat) => {
   socket.data.buscando = false;
@@ -400,27 +544,44 @@ io.on('connection', (socket: SocketChat) => {
   });
 
   socket.on('chat_message', (texto) => {
-    // Validación en servidor: tipo, contenido no vacío y longitud máxima.
-    // Aquí se enganchará el filtro de términos prohibidos en la Fase 4.
-    if (typeof texto !== 'string') return;
-    const limpio = texto.trim().slice(0, MAX_LONGITUD_MENSAJE);
-    if (!limpio) return;
+    void (async () => {
+      // Validación en servidor: tipo, contenido no vacío y longitud máxima.
+      if (typeof texto !== 'string') return;
+      const limpio = texto.trim().slice(0, MAX_LONGITUD_MENSAJE);
+      if (!limpio) return;
 
-    const peer = obtenerPeer(socket);
-    if (!peer || !socket.data.roomId) {
-      socket.emit('error_chat', 'No estás conectado con nadie.');
-      return;
-    }
+      const peer = obtenerPeer(socket);
+      if (!peer || !socket.data.roomId) {
+        socket.emit('error_chat', 'No estás conectado con nadie.');
+        return;
+      }
 
-    const mensaje = {
-      id: randomUUID(),
-      texto: limpio,
-      autorId: socket.id,
-      timestamp: Date.now(),
-    };
-    // Se emite a toda la sala (autor incluido) para que ambos clientes
-    // rendericen el mismo mensaje canónico validado por el servidor.
-    io.to(socket.data.roomId).emit('chat_message', mensaje);
+      // Rate limit de mensajes por segundo (anti-spam/flood).
+      const permitido = await dentroDelLimite(
+        redis, 'mensajes', socket.data.ipHash, LIMITES.mensajesPorSegundo, 1,
+      );
+      if (!permitido) {
+        socket.emit('error_chat', 'Estás enviando mensajes demasiado rápido.');
+        return;
+      }
+
+      // Filtro de términos prohibidos y datos personales (Fase 4).
+      const veredicto = evaluarTexto(limpio);
+      if (!veredicto.permitido) {
+        socket.emit('aviso_moderacion', { tipo: 'texto', mensaje: veredicto.aviso });
+        return;
+      }
+
+      const mensaje = {
+        id: randomUUID(),
+        texto: limpio,
+        autorId: socket.id,
+        timestamp: Date.now(),
+      };
+      // Se emite a toda la sala (autor incluido) para que ambos clientes
+      // rendericen el mismo mensaje canónico validado por el servidor.
+      io.to(socket.data.roomId).emit('chat_message', mensaje);
+    })().catch((err) => console.error('[chat] error:', err));
   });
 
   socket.on('typing', (escribiendo) => {
@@ -432,6 +593,65 @@ io.on('connection', (socket: SocketChat) => {
   socket.on('signal', (data) => {
     if (!esSignalValido(data)) return;
     obtenerPeer(socket)?.emit('signal', data);
+  });
+
+  // Denuncia manual: frame del video remoto + motivo → PostgreSQL.
+  socket.on('denunciar', (bruto) => {
+    void (async () => {
+      const payload = (typeof bruto === 'object' && bruto !== null ? bruto : {}) as Partial<PayloadDenuncia>;
+      const motivo = payload.motivo as MotivoDenuncia;
+      if (!(motivo in MOTIVOS_DENUNCIA)) return;
+
+      const permitido = await dentroDelLimite(
+        redis, 'denuncias', socket.data.ipHash, LIMITES.denunciasPorMinuto, 60,
+      );
+      if (!permitido) {
+        socket.emit('error_chat', 'Has enviado demasiadas denuncias seguidas.');
+        return;
+      }
+
+      const peer = obtenerPeer(socket);
+      if (!peer) {
+        socket.emit('error_chat', 'No hay nadie a quien denunciar.');
+        return;
+      }
+
+      await guardarDenuncia(socket, peer, motivo, 'manual', decodificarFrame(payload.frame));
+      socket.emit('denuncia_recibida');
+    })().catch((err) => {
+      console.error('[moderacion] error guardando denuncia:', err);
+      socket.emit('error_chat', 'No se pudo registrar la denuncia. Inténtalo de nuevo.');
+    });
+  });
+
+  // Alerta del detector NSFW del cliente (video local del propio usuario):
+  // 1.er strike → aviso; 2.º strike en una hora → ban temporal + denuncia auto.
+  socket.on('nsfw_alerta', (bruto) => {
+    void (async () => {
+      const payload = (typeof bruto === 'object' && bruto !== null ? bruto : {}) as Partial<PayloadAlertaNsfw>;
+      const permitido = await dentroDelLimite(
+        redis, 'nsfw', socket.data.ipHash, LIMITES.alertasNsfwPorMinuto, 60,
+      );
+      if (!permitido) return;
+
+      const strikes = await registrarStrikeNsfw(
+        redis,
+        socket.data.fingerprint ?? socket.data.ipHash,
+      );
+
+      if (strikes === 1) {
+        socket.emit('aviso_moderacion', {
+          tipo: 'nsfw',
+          mensaje:
+            'Se ha detectado posible contenido inapropiado en tu cámara. Si se repite, serás expulsado.',
+        });
+        return;
+      }
+
+      // Reincidencia: evidencia + ban escalado + desconexión.
+      await guardarDenuncia(socket, null, 'nsfw-auto', 'nsfw-auto', decodificarFrame(payload.frame));
+      await banearSocket(socket, 'Contenido inapropiado detectado por el sistema automático');
+    })().catch((err) => console.error('[moderacion] error en nsfw_alerta:', err));
   });
 
   socket.on('next', () => {
@@ -455,6 +675,28 @@ io.on('connection', (socket: SocketChat) => {
     });
   });
 });
+
+// --- Panel de administración -------------------------------------------------
+
+app.use(
+  '/admin',
+  crearRouterAdmin({
+    redis,
+    io,
+    desconectarBaneados,
+    tamanosColas: async () => {
+      const tamanos: Record<string, number> = {};
+      for (const modo of MODOS) tamanos[modo] = await redis.hlen(claveCola(modo));
+      return tamanos;
+    },
+  }),
+);
+
+// --- Arranque -----------------------------------------------------------------
+
+void recargarBanesActivos(redis).catch((err) =>
+  console.error('[moderacion] no se pudieron recargar los baneos:', err),
+);
 
 httpServer.listen(PUERTO, () => {
   console.log(`[signaling] escuchando en puerto ${PUERTO} (redis: ${REDIS_URL})`);
