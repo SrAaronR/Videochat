@@ -12,6 +12,11 @@ services:
       args:
         # URL del signaling VISTA DESDE EL NAVEGADOR (no desde el contenedor).
         NEXT_PUBLIC_SIGNALING_URL: ${NEXT_PUBLIC_SIGNALING_URL:-http://localhost:4000}
+        # Servidores ICE (también vistos desde el navegador).
+        NEXT_PUBLIC_STUN_URLS: ${NEXT_PUBLIC_STUN_URLS:-stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302}
+        NEXT_PUBLIC_TURN_URL: ${NEXT_PUBLIC_TURN_URL:-turn:localhost:3478}
+        NEXT_PUBLIC_TURN_USERNAME: ${NEXT_PUBLIC_TURN_USERNAME:-videochat}
+        NEXT_PUBLIC_TURN_PASSWORD: ${NEXT_PUBLIC_TURN_PASSWORD:-}
     ports:
       - '3000:3000'
     depends_on:

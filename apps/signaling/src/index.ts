@@ -18,9 +18,11 @@ import { Server, type Socket } from 'socket.io';
 import Redis from 'ioredis';
 import {
   MAX_LONGITUD_MENSAJE,
+  TIPOS_SIGNAL,
   type ClientToServerEvents,
   type MotivoSalida,
   type ServerToClientEvents,
+  type SignalPayload,
 } from '@videochat/shared';
 
 /** Datos que colgamos de cada socket conectado. */
@@ -157,6 +159,23 @@ function abandonarSala(socket: SocketChat, motivo: MotivoSalida): void {
   }
 }
 
+/** Tamaño máximo aceptado para un mensaje de señalización (un SDP típico son unos pocos KB). */
+const MAX_BYTES_SIGNAL = 100 * 1024;
+
+/** Comprueba que el payload de `signal` tiene una forma admisible antes del relay. */
+function esSignalValido(data: unknown): data is SignalPayload {
+  if (typeof data !== 'object' || data === null) return false;
+  const tipo = (data as { type?: unknown }).type;
+  if (typeof tipo !== 'string' || !(TIPOS_SIGNAL as readonly string[]).includes(tipo)) {
+    return false;
+  }
+  try {
+    return JSON.stringify(data).length <= MAX_BYTES_SIGNAL;
+  } catch {
+    return false;
+  }
+}
+
 /** Elimina al socket de la cola de Redis (si estaba encolado). */
 async function salirDeCola(socket: SocketChat): Promise<void> {
   socket.data.buscando = false;
@@ -201,8 +220,10 @@ io.on('connection', (socket: SocketChat) => {
     obtenerPeer(socket)?.emit('typing', Boolean(escribiendo));
   });
 
-  // Relay de señalización WebRTC (se usará en la Fase 2).
+  // Relay de señalización WebRTC (offer/answer/ICE). El servidor no
+  // interpreta el contenido: valida la forma y el tamaño y lo reenvía.
   socket.on('signal', (data) => {
+    if (!esSignalValido(data)) return;
     obtenerPeer(socket)?.emit('signal', data);
   });
 

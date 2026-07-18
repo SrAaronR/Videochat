@@ -11,6 +11,7 @@
 export type EstadoChat =
   | 'inactivo'
   | 'buscando'
+  | 'conectando'
   | 'conectado'
   | 'peer_desconectado';
 
@@ -38,6 +39,30 @@ export interface MatchEncontrado {
 /** Motivos por los que el peer abandona la sala. */
 export type MotivoSalida = 'siguiente' | 'detener' | 'desconexion';
 
+/**
+ * Candidato ICE serializado. Se define aquí (en lugar de usar
+ * RTCIceCandidateInit del DOM) para que el paquete compartido compile
+ * también en el servidor Node, que no tiene tipos del navegador.
+ */
+export interface CandidatoIce {
+  candidate?: string;
+  sdpMid?: string | null;
+  sdpMLineIndex?: number | null;
+  usernameFragment?: string | null;
+}
+
+/**
+ * Mensajes de señalización WebRTC que se retransmiten entre peers.
+ * El servidor NO los interpreta: solo valida la forma y hace de relay.
+ */
+export type SignalPayload =
+  | { type: 'offer'; sdp: string }
+  | { type: 'answer'; sdp: string }
+  | { type: 'candidate'; candidate: CandidatoIce };
+
+/** Tipos de `SignalPayload` admitidos (para validación en el servidor). */
+export const TIPOS_SIGNAL = ['offer', 'answer', 'candidate'] as const;
+
 /** Eventos que el servidor emite hacia el cliente. */
 export interface ServerToClientEvents {
   /** Confirmación de que el usuario ha entrado en la cola. */
@@ -50,8 +75,8 @@ export interface ServerToClientEvents {
   typing: (escribiendo: boolean) => void;
   /** El desconocido ha abandonado la sala. */
   peer_left: (motivo: MotivoSalida) => void;
-  /** Relay de señalización WebRTC (offer/answer/ICE) — se usará en Fase 2. */
-  signal: (data: unknown) => void;
+  /** Relay de señalización WebRTC (offer/answer/ICE). */
+  signal: (data: SignalPayload) => void;
   /** Error recuperable que la UI puede mostrar. */
   error_chat: (mensaje: string) => void;
 }
@@ -68,8 +93,8 @@ export interface ClientToServerEvents {
   next: () => void;
   /** Salir de la sala/cola y volver a la landing. */
   stop: () => void;
-  /** Relay de señalización WebRTC — se usará en Fase 2. */
-  signal: (data: unknown) => void;
+  /** Relay de señalización WebRTC (offer/answer/ICE). */
+  signal: (data: SignalPayload) => void;
 }
 
 /** Longitud máxima de un mensaje de chat aceptada por el servidor. */
