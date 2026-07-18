@@ -32,6 +32,9 @@ ENV NODE_ENV=production
 # El output standalone reproduce la estructura del monorepo.
 COPY --from=build /app/apps/web/.next/standalone ./
 COPY --from=build /app/apps/web/.next/static ./apps/web/.next/static
+# El output standalone NO incluye public/ automáticamente: hay que copiarlo
+# aparte para servir los assets estáticos (p. ej. el modelo NSFW).
+COPY --from=build /app/apps/web/public ./apps/web/public
 EXPOSE 3000
 ENV PORT=3000 HOSTNAME=0.0.0.0
 CMD ["node", "apps/web/server.js"]
