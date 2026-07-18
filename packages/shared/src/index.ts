@@ -15,6 +15,25 @@ export type EstadoChat =
   | 'conectado'
   | 'peer_desconectado';
 
+/** Modos de chat disponibles. */
+export type ModoChat = 'video' | 'texto';
+
+/** Criterios de búsqueda que el cliente envía al entrar en la cola. */
+export interface CriteriosBusqueda {
+  modo: ModoChat;
+  /** Intereses del usuario (tags libres tipo "gaming, música"). */
+  intereses: string[];
+  /**
+   * Filtro de país elegido por el usuario (código ISO-3166 alpha-2,
+   * p. ej. "ES") o null para emparejar con cualquier país.
+   */
+  filtroPais: string | null;
+}
+
+/** Límites de saneado de los criterios (aplicados en el servidor). */
+export const MAX_INTERESES = 5;
+export const MAX_LONGITUD_INTERES = 20;
+
 /** Mensaje de chat tal y como lo entrega el servidor. */
 export interface MensajeChat {
   /** Identificador único del mensaje (generado en el servidor). */
@@ -30,10 +49,16 @@ export interface MensajeChat {
 /** Payload que reciben ambos usuarios cuando hay emparejamiento. */
 export interface MatchEncontrado {
   roomId: string;
-  /** El servidor designa a un lado como initiator (creará la offer en Fase 2). */
+  /** El servidor designa a un lado como initiator (crea la offer WebRTC). */
   initiator: boolean;
   /** Id de socket del desconocido. */
   peerId: string;
+  /** Modo de la sala (video o solo texto). */
+  modo: ModoChat;
+  /** Intereses que ambos usuarios tienen en común (puede estar vacío). */
+  interesesComunes: string[];
+  /** País detectado del desconocido (ISO-3166 alpha-2) o null. */
+  paisPeer: string | null;
 }
 
 /** Motivos por los que el peer abandona la sala. */
@@ -83,8 +108,8 @@ export interface ServerToClientEvents {
 
 /** Eventos que el cliente emite hacia el servidor. */
 export interface ClientToServerEvents {
-  /** Entrar en la cola de emparejamiento. */
-  find_match: () => void;
+  /** Entrar en la cola de emparejamiento con los criterios elegidos. */
+  find_match: (criterios: CriteriosBusqueda) => void;
   /** Enviar un mensaje de chat (el servidor lo valida y retransmite). */
   chat_message: (texto: string) => void;
   /** Notificar que se está escribiendo o se ha dejado de escribir. */

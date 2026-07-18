@@ -1,25 +1,34 @@
 /**
- * Servidor de señalización — Fase 1.
+ * Servidor de señalización — Fases 1-3.
  *
  * Responsabilidades:
- *  - Matchmaking aleatorio básico con cola en Redis (LPUSH/LPOP atómicos).
+ *  - Matchmaking con cola en Redis (un hash por modo video/texto):
+ *      (a) durante los primeros 15 s se intenta match por intereses en común;
+ *      (b) pasado ese tiempo, match totalmente aleatorio;
+ *      (c) nunca se empareja con los últimos 3 matches de la sesión;
+ *      (d) filtro opcional por país (detectado por IP con geoip-lite).
  *  - Chat de texto retransmitido por el servidor (necesario para poder
- *    moderarlo en fases posteriores; nunca por data channel).
- *  - Relay del evento `signal` (offer/answer/ICE) preparado para la Fase 2.
+ *    moderarlo en la Fase 4; nunca por data channel).
+ *  - Relay del evento `signal` (offer/answer/ICE) para WebRTC.
  *
- * Deuda técnica declarada (ver README): las salas activas viven en memoria,
- * por lo que solo se soporta UNA instancia de este servidor. Para escalar
- * horizontalmente habrá que mover las salas a Redis y usar el adapter
- * @socket.io/redis-adapter.
+ * Deuda técnica declarada (ver README): las salas activas y el historial de
+ * matches viven en memoria, por lo que solo se soporta UNA instancia de este
+ * servidor. Para escalar horizontalmente habrá que moverlos a Redis y usar
+ * el adapter @socket.io/redis-adapter.
  */
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { Server, type Socket } from 'socket.io';
 import Redis from 'ioredis';
+import geoip from 'geoip-lite';
 import {
+  MAX_INTERESES,
+  MAX_LONGITUD_INTERES,
   MAX_LONGITUD_MENSAJE,
   TIPOS_SIGNAL,
   type ClientToServerEvents,
+  type CriteriosBusqueda,
+  type ModoChat,
   type MotivoSalida,
   type ServerToClientEvents,
   type SignalPayload,
@@ -31,6 +40,12 @@ interface DatosSocket {
   roomId?: string;
   /** true mientras el socket espera pareja en la cola. */
   buscando: boolean;
+  /** Últimos criterios de búsqueda (se reutilizan al pulsar "Siguiente"). */
+  criterios?: CriteriosBusqueda;
+  /** País detectado por IP (ISO-3166 alpha-2) o null si no se pudo. */
+  pais: string | null;
+  /** Ids de socket de los últimos matches (para no repetir). */
+  historial: string[];
 }
 
 type SocketChat = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, DatosSocket>;
@@ -41,13 +56,31 @@ interface Sala {
   b: string;
 }
 
+/** Entrada de la cola de emparejamiento (serializada en Redis). */
+interface Esperando {
+  socketId: string;
+  intereses: string[];
+  pais: string | null;
+  filtroPais: string | null;
+  /** Momento de entrada en la cola (ms epoch). */
+  desde: number;
+}
+
 const PUERTO = Number(process.env.PORT ?? 4000);
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://localhost:6379';
 /** Orígenes permitidos para CORS, separados por comas. */
 const ORIGENES = (process.env.CORS_ORIGIN ?? 'http://localhost:3000').split(',');
+/** País por defecto cuando GeoIP no resuelve (útil en desarrollo local). */
+const PAIS_POR_DEFECTO = process.env.PAIS_POR_DEFECTO || null;
 
-/** Clave de la cola de emparejamiento en Redis. */
-const CLAVE_COLA = 'matchmaking:cola';
+/** Ventana durante la que solo se acepta match por intereses en común. */
+const VENTANA_INTERESES_MS = Number(process.env.VENTANA_INTERESES_MS ?? 15_000);
+/** Cadencia del paso periódico de emparejamiento. */
+const INTERVALO_PASO_MS = 2_000;
+/** Cuántos matches recientes no se repiten. */
+const MAX_HISTORIAL = 3;
+
+const MODOS: ModoChat[] = ['video', 'texto'];
 
 const redis = new Redis(REDIS_URL);
 redis.on('error', (err) => console.error('[redis] error:', err.message));
@@ -70,63 +103,228 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
 /** Salas activas en memoria (ver nota de deuda técnica en la cabecera). */
 const salas = new Map<string, Sala>();
 
-/**
- * Saca candidatos de la cola hasta encontrar uno válido.
- * LPOP es atómico, así que dos búsquedas simultáneas nunca obtienen
- * el mismo candidato. Los ids obsoletos (desconectados, ya emparejados
- * o que cancelaron la búsqueda) se descartan sobre la marcha.
- */
-async function extraerCandidato(solicitante: SocketChat): Promise<SocketChat | null> {
-  // Límite defensivo para no iterar indefinidamente sobre una cola corrupta.
-  for (let i = 0; i < 100; i++) {
-    const candidatoId = await redis.lpop(CLAVE_COLA);
-    if (!candidatoId) return null;
-    if (candidatoId === solicitante.id) continue;
+// ---------------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------------
 
-    const candidato = io.sockets.sockets.get(candidatoId) as SocketChat | undefined;
-    if (!candidato || !candidato.data.buscando || candidato.data.roomId) continue;
-    return candidato;
-  }
-  return null;
+/** Clave del hash de Redis con la cola de espera de un modo. */
+function claveCola(modo: ModoChat): string {
+  return `cola:${modo}`;
 }
 
-/** Crea la sala, une a ambos sockets y les notifica el match. */
-function emparejar(a: SocketChat, b: SocketChat): void {
+/** Detecta el país del socket por su IP (cabecera de proxy o dirección directa). */
+function detectarPais(socket: SocketChat): string | null {
+  const xff = socket.handshake.headers['x-forwarded-for'];
+  const ip =
+    (typeof xff === 'string' ? xff.split(',')[0]?.trim() : undefined) ??
+    socket.handshake.address;
+  const resultado = ip ? geoip.lookup(ip) : null;
+  return resultado?.country ?? PAIS_POR_DEFECTO;
+}
+
+/** Sanea los criterios recibidos del cliente (tipos, límites y formato). */
+function sanearCriterios(bruto: unknown): CriteriosBusqueda {
+  const criterios = (typeof bruto === 'object' && bruto !== null ? bruto : {}) as Partial<CriteriosBusqueda>;
+
+  const modo: ModoChat = criterios.modo === 'texto' ? 'texto' : 'video';
+
+  const intereses = Array.isArray(criterios.intereses)
+    ? [...new Set(
+        criterios.intereses
+          .filter((i): i is string => typeof i === 'string')
+          .map((i) => i.trim().toLowerCase().slice(0, MAX_LONGITUD_INTERES))
+          .filter(Boolean),
+      )].slice(0, MAX_INTERESES)
+    : [];
+
+  const filtroPais =
+    typeof criterios.filtroPais === 'string' && /^[a-zA-Z]{2}$/.test(criterios.filtroPais)
+      ? criterios.filtroPais.toUpperCase()
+      : null;
+
+  return { modo, intereses, filtroPais };
+}
+
+/** Intereses en común entre dos entradas de la cola. */
+function interesesComunes(u: Esperando, v: Esperando): string[] {
+  const setV = new Set(v.intereses);
+  return u.intereses.filter((i) => setV.has(i));
+}
+
+/**
+ * Regla de intereses de un solo lado: `a` acepta a `b` si no puso intereses,
+ * si ya agotó la ventana de 15 s, o si comparten al menos uno.
+ */
+function aceptaPorIntereses(a: Esperando, b: Esperando, ahora: number): boolean {
+  if (a.intereses.length === 0) return true;
+  if (ahora - a.desde > VENTANA_INTERESES_MS) return true;
+  return interesesComunes(a, b).length > 0;
+}
+
+/** Comprueba todas las reglas de compatibilidad entre dos usuarios en espera. */
+function sonCompatibles(u: Esperando, v: Esperando, ahora: number): boolean {
+  if (u.socketId === v.socketId) return false;
+
+  const socketU = io.sockets.sockets.get(u.socketId) as SocketChat | undefined;
+  const socketV = io.sockets.sockets.get(v.socketId) as SocketChat | undefined;
+  if (!socketU || !socketV) return false;
+
+  // (c) Nunca repetir con los últimos matches de la sesión (en ambos sentidos).
+  if (socketU.data.historial.includes(v.socketId)) return false;
+  if (socketV.data.historial.includes(u.socketId)) return false;
+
+  // (d) Filtro de país: si un lado lo fijó, el otro debe cumplirlo.
+  if (u.filtroPais && v.pais !== u.filtroPais) return false;
+  if (v.filtroPais && u.pais !== v.filtroPais) return false;
+
+  // (a)/(b) Regla de intereses con ventana de 15 s, en ambos sentidos.
+  return aceptaPorIntereses(u, v, ahora) && aceptaPorIntereses(v, u, ahora);
+}
+
+// ---------------------------------------------------------------------------
+// Matchmaking
+// ---------------------------------------------------------------------------
+
+/** Crea la sala, une a ambos sockets, actualiza historiales y notifica. */
+function emparejar(entradaA: Esperando, entradaB: Esperando, modo: ModoChat): void {
+  const a = io.sockets.sockets.get(entradaA.socketId) as SocketChat | undefined;
+  const b = io.sockets.sockets.get(entradaB.socketId) as SocketChat | undefined;
+  if (!a || !b) return;
+
   const roomId = randomUUID();
   salas.set(roomId, { a: a.id, b: b.id });
+  const comunes = interesesComunes(entradaA, entradaB);
 
-  for (const socket of [a, b]) {
+  for (const [socket, otro] of [[a, b], [b, a]] as const) {
     socket.data.roomId = roomId;
     socket.data.buscando = false;
     socket.join(roomId);
+    // Historial corto por sesión para la regla de no-repetición.
+    socket.data.historial = [otro.id, ...socket.data.historial].slice(0, MAX_HISTORIAL);
   }
 
-  // El servidor designa al solicitante más antiguo (b, que ya esperaba
-  // en la cola) como initiator: será quien cree la offer en la Fase 2.
-  a.emit('match_found', { roomId, initiator: false, peerId: b.id });
-  b.emit('match_found', { roomId, initiator: true, peerId: a.id });
+  // El que más tiempo llevaba esperando (entradaA) es el initiator WebRTC.
+  a.emit('match_found', {
+    roomId,
+    initiator: true,
+    peerId: b.id,
+    modo,
+    interesesComunes: comunes,
+    paisPeer: entradaB.pais,
+  });
+  b.emit('match_found', {
+    roomId,
+    initiator: false,
+    peerId: a.id,
+    modo,
+    interesesComunes: comunes,
+    paisPeer: entradaA.pais,
+  });
 }
 
-/** Intenta emparejar al socket; si no hay nadie disponible, lo encola. */
-async function buscarPareja(socket: SocketChat): Promise<void> {
+/** Evita pasos concurrentes de emparejamiento por modo. */
+const pasoEnCurso: Record<ModoChat, boolean> = { video: false, texto: false };
+
+/**
+ * Paso de emparejamiento: carga la cola del modo, descarta entradas
+ * obsoletas y empareja de forma voraz (los que más esperan primero,
+ * prefiriendo el candidato con más intereses en común). Los usuarios se
+ * reclaman con HDEL atómico para que un `stop`/desconexión concurrente
+ * no produzca dobles matches.
+ */
+async function pasoDeEmparejamiento(modo: ModoChat): Promise<void> {
+  if (pasoEnCurso[modo]) return;
+  pasoEnCurso[modo] = true;
+  try {
+    const clave = claveCola(modo);
+    const bruto = await redis.hgetall(clave);
+    const ahora = Date.now();
+
+    const espera: Esperando[] = [];
+    for (const [socketId, json] of Object.entries(bruto)) {
+      const socket = io.sockets.sockets.get(socketId) as SocketChat | undefined;
+      if (!socket || !socket.data.buscando || socket.data.roomId) {
+        await redis.hdel(clave, socketId); // entrada obsoleta
+        continue;
+      }
+      try {
+        espera.push(JSON.parse(json) as Esperando);
+      } catch {
+        await redis.hdel(clave, socketId);
+      }
+    }
+
+    espera.sort((a, b) => a.desde - b.desde);
+    const usados = new Set<string>();
+
+    for (const u of espera) {
+      if (usados.has(u.socketId)) continue;
+
+      // Mejor candidato: compatible con más intereses en común; a igualdad,
+      // el que más tiempo lleva esperando (orden del bucle).
+      let mejor: Esperando | null = null;
+      let mejorComunes = -1;
+      for (const v of espera) {
+        if (usados.has(v.socketId) || !sonCompatibles(u, v, ahora)) continue;
+        const comunes = interesesComunes(u, v).length;
+        if (comunes > mejorComunes) {
+          mejor = v;
+          mejorComunes = comunes;
+        }
+      }
+      if (!mejor) continue;
+
+      // Reclamo atómico de ambos: si alguno ya no está (stop/desconexión
+      // durante este paso), se devuelve a la cola al que siga válido.
+      const borrados = await redis.hdel(clave, u.socketId, mejor.socketId);
+      if (borrados < 2) {
+        for (const w of [u, mejor]) {
+          const s = io.sockets.sockets.get(w.socketId) as SocketChat | undefined;
+          if (s?.data.buscando && !s.data.roomId) {
+            await redis.hset(clave, w.socketId, JSON.stringify(w));
+          }
+        }
+        continue;
+      }
+
+      usados.add(u.socketId);
+      usados.add(mejor.socketId);
+      emparejar(u, mejor, modo);
+    }
+  } catch (err) {
+    console.error(`[matchmaking] error en paso (${modo}):`, err);
+  } finally {
+    pasoEnCurso[modo] = false;
+  }
+}
+
+/** Encola al socket con sus criterios y dispara un paso inmediato. */
+async function encolar(socket: SocketChat, criterios: CriteriosBusqueda): Promise<void> {
   if (socket.data.roomId) return; // Ya está en una sala.
+  socket.data.criterios = criterios;
   socket.data.buscando = true;
 
-  const candidato = await extraerCandidato(socket);
-
-  // El propio solicitante pudo desconectarse mientras consultábamos Redis.
-  if (!socket.connected || !socket.data.buscando) {
-    if (candidato) await redis.rpush(CLAVE_COLA, candidato.id);
-    return;
-  }
-
-  if (candidato) {
-    emparejar(socket, candidato);
-  } else {
-    await redis.rpush(CLAVE_COLA, socket.id);
-    socket.emit('buscando');
-  }
+  const entrada: Esperando = {
+    socketId: socket.id,
+    intereses: criterios.intereses,
+    pais: socket.data.pais,
+    filtroPais: criterios.filtroPais,
+    desde: Date.now(),
+  };
+  await redis.hset(claveCola(criterios.modo), socket.id, JSON.stringify(entrada));
+  socket.emit('buscando');
+  void pasoDeEmparejamiento(criterios.modo);
 }
+
+// Paso periódico: reempareja a quienes agotaron la ventana de intereses
+// sin necesidad de que entre nadie nuevo en la cola.
+setInterval(() => {
+  for (const modo of MODOS) void pasoDeEmparejamiento(modo);
+}, INTERVALO_PASO_MS);
+
+// ---------------------------------------------------------------------------
+// Salas
+// ---------------------------------------------------------------------------
 
 /** Devuelve el socket del otro participante de la sala, si sigue conectado. */
 function obtenerPeer(socket: SocketChat): SocketChat | null {
@@ -176,17 +374,26 @@ function esSignalValido(data: unknown): data is SignalPayload {
   }
 }
 
-/** Elimina al socket de la cola de Redis (si estaba encolado). */
+/** Elimina al socket de las colas de Redis (si estaba encolado). */
 async function salirDeCola(socket: SocketChat): Promise<void> {
   socket.data.buscando = false;
-  await redis.lrem(CLAVE_COLA, 0, socket.id);
+  for (const modo of MODOS) {
+    await redis.hdel(claveCola(modo), socket.id);
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Conexiones
+// ---------------------------------------------------------------------------
 
 io.on('connection', (socket: SocketChat) => {
   socket.data.buscando = false;
+  socket.data.historial = [];
+  socket.data.pais = detectarPais(socket);
 
-  socket.on('find_match', () => {
-    void buscarPareja(socket).catch((err) => {
+  socket.on('find_match', (criteriosBrutos) => {
+    const criterios = sanearCriterios(criteriosBrutos);
+    void encolar(socket, criterios).catch((err) => {
       console.error('[matchmaking] error:', err);
       socket.emit('error_chat', 'Error interno buscando pareja. Inténtalo de nuevo.');
     });
@@ -229,7 +436,8 @@ io.on('connection', (socket: SocketChat) => {
 
   socket.on('next', () => {
     abandonarSala(socket, 'siguiente');
-    void buscarPareja(socket).catch((err) => {
+    const criterios = socket.data.criterios ?? sanearCriterios(null);
+    void encolar(socket, criterios).catch((err) => {
       console.error('[matchmaking] error en next:', err);
       socket.emit('error_chat', 'Error interno buscando pareja. Inténtalo de nuevo.');
     });

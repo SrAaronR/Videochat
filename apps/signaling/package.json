@@ -11,11 +11,13 @@
   },
   "dependencies": {
     "@videochat/shared": "*",
+    "geoip-lite": "^1.4.10",
     "ioredis": "^5.4.1",
     "socket.io": "^4.7.5",
     "tsx": "^4.19.0"
   },
   "devDependencies": {
+    "@types/geoip-lite": "^1.4.4",
     "@types/node": "^22.5.0",
     "typescript": "^5.5.4"
   }

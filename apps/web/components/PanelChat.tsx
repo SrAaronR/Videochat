@@ -21,6 +21,8 @@ interface Props {
   peerEscribiendo: boolean;
   alCambiarBorrador: (valor: string) => void;
   alEnviar: () => void;
+  /** true en modo "Solo texto": el panel ocupa todo el espacio disponible. */
+  expandido?: boolean;
 }
 
 export default function PanelChat({
@@ -30,6 +32,7 @@ export default function PanelChat({
   peerEscribiendo,
   alCambiarBorrador,
   alEnviar,
+  expandido = false,
 }: Props) {
   const finListaRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -41,7 +44,11 @@ export default function PanelChat({
   return (
     <aside
       aria-label="Chat de texto"
-      className="flex h-48 flex-none flex-col border-t border-slate-800 bg-slate-950 md:h-auto md:w-96 md:border-l md:border-t-0"
+      className={
+        expandido
+          ? 'flex min-h-0 flex-1 flex-col bg-slate-950'
+          : 'flex h-48 flex-none flex-col border-t border-slate-800 bg-slate-950 md:h-auto md:w-96 md:border-l md:border-t-0'
+      }
     >
       <div className="flex-1 space-y-2 overflow-y-auto p-3">
         {mensajes.length === 0 && conectado && (

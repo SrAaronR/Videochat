@@ -1,19 +1,17 @@
 'use client';
 
 /**
- * Sala de videochat — Fase 2.
+ * Sala de chat — Fases 2 y 3.
  *
- * Flujo WebRTC (según especificación):
- *  1. Ambos clientes reciben `match_found` con roomId; el servidor designa
- *     al initiator.
- *  2. El initiator crea la offer y la envía por Socket.IO (`signal`).
- *  3. El otro responde con answer; ambos intercambian candidatos ICE por
- *     el mismo canal.
- *  4. STUN de Google + TURN propio como respaldo. Si en 10 s no hay
- *     conexión: error y re-match automático.
- *  5. "Siguiente"/cierre de pestaña: se cierra la RTCPeerConnection, se
- *     notifica al peer y se limpia la sala; quien pulsó se reencola al
- *     instante y el otro ve el aviso y vuelve a buscar automáticamente.
+ * Modo video: flujo WebRTC completo (ver cabecera de lib/webrtc.ts y la
+ * especificación): el initiator crea la offer, answer + ICE por Socket.IO,
+ * timeout de 10 s con re-match automático.
+ * Modo "Solo texto": misma lógica de emparejamiento y chat, sin flujo de
+ * video (no se pide cámara ni se crea RTCPeerConnection).
+ *
+ * Los criterios (modo, intereses, filtro de país) llegan por querystring
+ * desde la landing y se envían al servidor en `find_match`.
+ * En móvil, deslizar horizontalmente sobre el video equivale a "Siguiente".
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -21,11 +19,13 @@ import { useRouter } from 'next/navigation';
 import { io, type Socket } from 'socket.io-client';
 import type {
   ClientToServerEvents,
+  CriteriosBusqueda,
   EstadoChat,
   ServerToClientEvents,
   SignalPayload,
 } from '@videochat/shared';
 import PanelChat, { type MensajeUI } from '@/components/PanelChat';
+import { nombrePais } from '@/lib/paises';
 import {
   crearConfiguracionRtc,
   RESTRICCIONES_MEDIA,
@@ -48,15 +48,47 @@ const TEXTO_ESTADO: Record<EstadoChat, string> = {
 /** Estado del acceso a cámara y micrófono. */
 type EstadoMedia = 'pidiendo' | 'ok' | 'denegado';
 
+/** Información del match actual mostrada en la UI. */
+interface InfoMatch {
+  interesesComunes: string[];
+  paisPeer: string | null;
+}
+
 const MOTIVOS_DENUNCIA = ['Desnudez', 'Menor de edad', 'Acoso', 'Spam', 'Otro'];
+
+/** Desplazamiento mínimo (px) para que un deslizamiento cuente como "Siguiente". */
+const UMBRAL_SWIPE_PX = 80;
+
+/** Lee los criterios de búsqueda del querystring de la landing. */
+function parsearCriterios(search: string): CriteriosBusqueda {
+  const params = new URLSearchParams(search);
+  const modo = params.get('modo') === 'texto' ? 'texto' : 'video';
+  const intereses = (params.get('intereses') ?? '')
+    .split(',')
+    .map((i) => i.trim())
+    .filter(Boolean);
+  const pais = params.get('pais');
+  return {
+    modo,
+    intereses,
+    filtroPais: pais && /^[a-zA-Z]{2}$/.test(pais) ? pais.toUpperCase() : null,
+  };
+}
 
 export default function PaginaChat() {
   const router = useRouter();
+
+  // Los criterios se leen en cliente (querystring); hasta entonces no se renderiza la sala.
+  const [criterios, setCriterios] = useState<CriteriosBusqueda | null>(null);
+  useEffect(() => {
+    setCriterios(parsearCriterios(window.location.search));
+  }, []);
 
   // --- Estado de UI ---
   const [estadoMedia, setEstadoMedia] = useState<EstadoMedia>('pidiendo');
   const [estado, setEstado] = useState<EstadoChat>('inactivo');
   const [aviso, setAviso] = useState<string | null>(null);
+  const [infoMatch, setInfoMatch] = useState<InfoMatch | null>(null);
   const [mensajes, setMensajes] = useState<MensajeUI[]>([]);
   const [borrador, setBorrador] = useState('');
   const [peerEscribiendo, setPeerEscribiendo] = useState(false);
@@ -75,12 +107,14 @@ export default function PaginaChat() {
   const zonaVideoRef = useRef<HTMLElement | null>(null);
   /** Candidatos ICE recibidos antes de tener remoteDescription. */
   const candidatosPendientesRef = useRef<SignalPayload[]>([]);
-  const esInitiatorRef = useRef(false);
   const estadoRef = useRef<EstadoChat>('inactivo');
   const timeoutConexionRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timeoutRebusquedaRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const timeoutEscribiendoRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const arrastreRef = useRef<{ dx: number; dy: number } | null>(null);
+  const inicioSwipeRef = useRef<{ x: number; y: number } | null>(null);
+
+  const modoTexto = criterios?.modo === 'texto';
 
   const cambiarEstado = useCallback((nuevo: EstadoChat) => {
     estadoRef.current = nuevo;
@@ -114,8 +148,10 @@ export default function PaginaChat() {
     limpiarPeerConnection();
     setMensajes([]);
     setPeerEscribiendo(false);
+    setInfoMatch(null);
     cambiarEstado('buscando');
-    // `next` corta la sala actual en el servidor (si la hay) y reencola.
+    // `next` corta la sala actual en el servidor (si la hay) y reencola
+    // con los mismos criterios.
     socketRef.current?.emit('next');
   }, [cambiarEstado, limpiarPeerConnection]);
 
@@ -228,30 +264,36 @@ export default function PaginaChat() {
     [vaciarCandidatosPendientes],
   );
 
-  // --- Arranque: cámara/micro primero, luego socket y matchmaking ---
+  // --- Arranque: (video) cámara/micro primero; luego socket y matchmaking ---
   useEffect(() => {
+    if (!criterios) return;
     let cancelado = false;
     let socket: SocketCliente | null = null;
+    const esTexto = criterios.modo === 'texto';
 
     async function iniciar() {
-      // 1) Permisos de media. Sin cámara/micro no se entra en la cola.
-      let stream: MediaStream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia(RESTRICCIONES_MEDIA);
-      } catch {
-        if (!cancelado) setEstadoMedia('denegado');
-        return;
+      // 1) Permisos de media (solo en modo video).
+      if (esTexto) {
+        setEstadoMedia('ok');
+      } else {
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia(RESTRICCIONES_MEDIA);
+        } catch {
+          if (!cancelado) setEstadoMedia('denegado');
+          return;
+        }
+        if (cancelado) {
+          for (const track of stream.getTracks()) track.stop();
+          return;
+        }
+        streamLocalRef.current = stream;
+        if (videoLocalRef.current) {
+          videoLocalRef.current.srcObject = stream;
+          void videoLocalRef.current.play().catch(() => undefined);
+        }
+        setEstadoMedia('ok');
       }
-      if (cancelado) {
-        for (const track of stream.getTracks()) track.stop();
-        return;
-      }
-      streamLocalRef.current = stream;
-      if (videoLocalRef.current) {
-        videoLocalRef.current.srcObject = stream;
-        void videoLocalRef.current.play().catch(() => undefined);
-      }
-      setEstadoMedia('ok');
 
       // 2) Socket de señalización (reconexión automática con backoff).
       socket = io(URL_SIGNALING, {
@@ -264,7 +306,7 @@ export default function PaginaChat() {
       socket.on('connect', () => {
         setAviso(null);
         cambiarEstado('buscando');
-        socket?.emit('find_match');
+        socket?.emit('find_match', criterios!);
       });
 
       socket.on('connect_error', () => {
@@ -284,7 +326,7 @@ export default function PaginaChat() {
 
       socket.on('buscando', () => cambiarEstado('buscando'));
 
-      socket.on('match_found', ({ initiator }) => {
+      socket.on('match_found', ({ initiator, interesesComunes, paisPeer, modo }) => {
         if (timeoutRebusquedaRef.current) {
           clearTimeout(timeoutRebusquedaRef.current);
           timeoutRebusquedaRef.current = null;
@@ -292,9 +334,15 @@ export default function PaginaChat() {
         setMensajes([]);
         setPeerEscribiendo(false);
         setAviso(null);
-        esInitiatorRef.current = initiator;
-        cambiarEstado('conectando');
+        setInfoMatch({ interesesComunes, paisPeer });
 
+        // En modo texto no hay WebRTC: el match ya es la conexión.
+        if (modo === 'texto') {
+          cambiarEstado('conectado');
+          return;
+        }
+
+        cambiarEstado('conectando');
         const pc = crearPeerConnection();
         // El initiator crea la offer; el otro espera a recibirla.
         if (initiator) {
@@ -354,7 +402,7 @@ export default function PaginaChat() {
         streamLocalRef.current = null;
       }
     };
-  }, [buscarDeNuevo, cambiarEstado, crearPeerConnection, limpiarPeerConnection, procesarSignal]);
+  }, [criterios, buscarDeNuevo, cambiarEstado, crearPeerConnection, limpiarPeerConnection, procesarSignal]);
 
   // --- Acciones de usuario ---
 
@@ -405,6 +453,29 @@ export default function PaginaChat() {
     }
   }, []);
 
+  // --- Gesto de deslizar para "Siguiente" (móvil) ---
+
+  const alTocarInicio = useCallback((evento: React.TouchEvent) => {
+    const toque = evento.touches[0];
+    if (toque) inicioSwipeRef.current = { x: toque.clientX, y: toque.clientY };
+  }, []);
+
+  const alTocarFin = useCallback(
+    (evento: React.TouchEvent) => {
+      const inicio = inicioSwipeRef.current;
+      inicioSwipeRef.current = null;
+      const toque = evento.changedTouches[0];
+      if (!inicio || !toque) return;
+      const dx = toque.clientX - inicio.x;
+      const dy = toque.clientY - inicio.y;
+      // Deslizamiento horizontal claro (en cualquier dirección) → Siguiente.
+      if (Math.abs(dx) > UMBRAL_SWIPE_PX && Math.abs(dx) > 2 * Math.abs(dy)) {
+        buscarDeNuevo();
+      }
+    },
+    [buscarDeNuevo],
+  );
+
   // --- Arrastre del video local (escritorio) ---
 
   const alPulsarVideoLocal = useCallback((evento: React.PointerEvent<HTMLDivElement>) => {
@@ -437,7 +508,70 @@ export default function PaginaChat() {
     evento.currentTarget.releasePointerCapture(evento.pointerId);
   }, []);
 
+  // --- Piezas de UI compartidas entre modos ---
+
+  const chipInfoMatch =
+    infoMatch && (infoMatch.interesesComunes.length > 0 || infoMatch.paisPeer) ? (
+      <p className="flex flex-wrap items-center gap-1 text-xs text-slate-300">
+        {infoMatch.paisPeer && (
+          <span className="rounded-full bg-slate-800 px-2 py-0.5">
+            📍 {nombrePais(infoMatch.paisPeer)}
+          </span>
+        )}
+        {infoMatch.interesesComunes.map((interes) => (
+          <span key={interes} className="rounded-full bg-indigo-500/20 px-2 py-0.5 text-indigo-300">
+            #{interes}
+          </span>
+        ))}
+      </p>
+    ) : null;
+
+  const dialogoDenuncia = denunciaAbierta ? (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Denunciar al desconocido"
+      className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/80 p-4"
+    >
+      <div className="w-full max-w-sm space-y-3 rounded-2xl bg-slate-900 p-5">
+        <h2 className="text-lg font-bold">Denunciar al desconocido</h2>
+        <p className="text-sm text-slate-400">
+          Selecciona el motivo. El registro de denuncias en el servidor se
+          activa en la Fase 4.
+        </p>
+        <div className="space-y-2">
+          {MOTIVOS_DENUNCIA.map((motivo) => (
+            <button
+              key={motivo}
+              onClick={() => {
+                setDenunciaAbierta(false);
+                setAviso('Gracias. La denuncia se procesará cuando la moderación esté activa (Fase 4).');
+              }}
+              className="block w-full rounded-lg bg-slate-800 px-3 py-2 text-left text-sm transition hover:bg-slate-700"
+            >
+              {motivo}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => setDenunciaAbierta(false)}
+          className="w-full rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold transition hover:bg-slate-600"
+        >
+          Cancelar
+        </button>
+      </div>
+    </div>
+  ) : null;
+
   // --- Pantallas especiales ---
+
+  if (!criterios) {
+    return (
+      <main className="flex min-h-dvh items-center justify-center">
+        <p className="text-slate-400">Cargando…</p>
+      </main>
+    );
+  }
 
   if (estadoMedia === 'denegado') {
     return (
@@ -445,9 +579,10 @@ export default function PaginaChat() {
         <h1 className="text-2xl font-bold">Necesitamos cámara y micrófono</h1>
         <p className="max-w-md text-slate-400">
           Has denegado el acceso a la cámara o al micrófono. Concede los
-          permisos en tu navegador y vuelve a intentarlo.
+          permisos en tu navegador y vuelve a intentarlo, o prueba el modo
+          solo texto.
         </p>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap justify-center gap-3">
           <button
             onClick={() => window.location.reload()}
             className="rounded-xl bg-indigo-500 px-6 py-3 font-semibold transition hover:bg-indigo-400"
@@ -468,13 +603,88 @@ export default function PaginaChat() {
   const claseBotonControl =
     'rounded-full p-3 text-lg leading-none transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300';
 
+  // --- Modo "Solo texto" ---
+
+  if (modoTexto) {
+    return (
+      <main
+        className="relative mx-auto flex h-dvh max-w-3xl flex-col"
+        onTouchStart={alTocarInicio}
+        onTouchEnd={alTocarFin}
+      >
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 p-3">
+          <div className="min-w-0 space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span
+                aria-hidden
+                className={`h-2.5 w-2.5 flex-none rounded-full ${
+                  estado === 'conectado'
+                    ? 'bg-emerald-400'
+                    : estado === 'buscando'
+                      ? 'animate-pulse bg-amber-400'
+                      : 'bg-slate-500'
+                }`}
+              />
+              <p aria-live="polite" className="truncate text-sm text-slate-300">
+                {TEXTO_ESTADO[estado]}
+              </p>
+            </div>
+            {chipInfoMatch}
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setDenunciaAbierta(true)}
+              aria-label="Denunciar al desconocido"
+              className={`${claseBotonControl} bg-rose-700 text-base hover:bg-rose-600`}
+            >
+              🚩
+            </button>
+            <button
+              onClick={buscarDeNuevo}
+              className="rounded-xl bg-indigo-500 px-4 py-2 text-sm font-semibold transition hover:bg-indigo-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300"
+            >
+              Siguiente
+            </button>
+            <button
+              onClick={detener}
+              className="rounded-xl bg-slate-700 px-4 py-2 text-sm font-semibold transition hover:bg-slate-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+            >
+              Detener
+            </button>
+          </div>
+        </header>
+
+        {aviso && (
+          <p role="alert" className="mx-3 mt-2 rounded-lg bg-rose-500/15 px-3 py-2 text-sm text-rose-300">
+            {aviso}
+          </p>
+        )}
+
+        <PanelChat
+          expandido
+          estado={estado}
+          mensajes={mensajes}
+          borrador={borrador}
+          peerEscribiendo={peerEscribiendo}
+          alCambiarBorrador={alEscribir}
+          alEnviar={enviarMensaje}
+        />
+        {dialogoDenuncia}
+      </main>
+    );
+  }
+
+  // --- Modo video ---
+
   return (
     <main className="flex h-dvh flex-col md:flex-row">
-      {/* Zona de video */}
+      {/* Zona de video (deslizar horizontalmente = Siguiente en móvil) */}
       <section
         ref={zonaVideoRef}
         aria-label="Videollamada"
         className="relative flex-1 overflow-hidden bg-black"
+        onTouchStart={alTocarInicio}
+        onTouchEnd={alTocarFin}
       >
         {/* Video remoto a pantalla completa de la zona */}
         <video
@@ -498,6 +708,13 @@ export default function PaginaChat() {
                 ? 'Pidiendo acceso a cámara y micrófono…'
                 : TEXTO_ESTADO[estado]}
             </p>
+          </div>
+        )}
+
+        {/* Chip de país/intereses en común del match actual */}
+        {estado === 'conectado' && chipInfoMatch && (
+          <div className="absolute left-3 top-3 z-10 rounded-xl bg-slate-950/70 px-2.5 py-1.5 backdrop-blur">
+            {chipInfoMatch}
           </div>
         )}
 
@@ -535,8 +752,8 @@ export default function PaginaChat() {
           )}
         </div>
 
-        {/* Barra de controles */}
-        <div className="absolute bottom-3 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2 rounded-2xl bg-slate-950/70 p-2 backdrop-blur">
+        {/* Barra de controles (padding extra para la zona segura de iOS) */}
+        <div className="absolute bottom-3 left-1/2 z-10 flex max-w-[95%] -translate-x-1/2 flex-wrap items-center justify-center gap-2 rounded-2xl bg-slate-950/70 p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] backdrop-blur">
           <button
             onClick={alternarMicro}
             aria-label={micActivo ? 'Silenciar micrófono' : 'Activar micrófono'}
@@ -582,43 +799,7 @@ export default function PaginaChat() {
           </button>
         </div>
 
-        {/* Diálogo de denuncia (el envío al backend llega en la Fase 4) */}
-        {denunciaAbierta && (
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label="Denunciar al desconocido"
-            className="absolute inset-0 z-30 flex items-center justify-center bg-slate-950/80 p-4"
-          >
-            <div className="w-full max-w-sm space-y-3 rounded-2xl bg-slate-900 p-5">
-              <h2 className="text-lg font-bold">Denunciar al desconocido</h2>
-              <p className="text-sm text-slate-400">
-                Selecciona el motivo. El registro de denuncias en el servidor
-                se activa en la Fase 4.
-              </p>
-              <div className="space-y-2">
-                {MOTIVOS_DENUNCIA.map((motivo) => (
-                  <button
-                    key={motivo}
-                    onClick={() => {
-                      setDenunciaAbierta(false);
-                      setAviso('Gracias. La denuncia se procesará cuando la moderación esté activa (Fase 4).');
-                    }}
-                    className="block w-full rounded-lg bg-slate-800 px-3 py-2 text-left text-sm transition hover:bg-slate-700"
-                  >
-                    {motivo}
-                  </button>
-                ))}
-              </div>
-              <button
-                onClick={() => setDenunciaAbierta(false)}
-                className="w-full rounded-lg bg-slate-700 px-3 py-2 text-sm font-semibold transition hover:bg-slate-600"
-              >
-                Cancelar
-              </button>
-            </div>
-          </div>
-        )}
+        {dialogoDenuncia}
       </section>
 
       {/* Chat lateral (escritorio) / inferior (móvil) */}
