@@ -46,7 +46,22 @@ interface Metricas {
   denunciasHoraAnterior: number;
 }
 
-type Pestana = 'denuncias' | 'baneos' | 'metricas';
+interface ParticipanteVigilancia {
+  sessionId: string;
+  pais: string | null;
+  frame: string | null;
+}
+interface SalaVigilancia {
+  roomId: string;
+  a: ParticipanteVigilancia;
+  b: ParticipanteVigilancia;
+}
+interface EstadoVigilancia {
+  activa: boolean;
+  rooms: SalaVigilancia[];
+}
+
+type Pestana = 'denuncias' | 'baneos' | 'vigilancia' | 'metricas';
 
 const fecha = (ms: number) =>
   new Date(ms).toLocaleString('es', { dateStyle: 'short', timeStyle: 'medium' });
@@ -59,6 +74,7 @@ export default function PaginaAdmin() {
   const [denuncias, setDenuncias] = useState<Denuncia[]>([]);
   const [baneos, setBaneos] = useState<Baneo[]>([]);
   const [metricas, setMetricas] = useState<Metricas | null>(null);
+  const [vigilancia, setVigilancia] = useState<EstadoVigilancia | null>(null);
 
   useEffect(() => {
     setToken(localStorage.getItem(CLAVE_TOKEN));
@@ -109,6 +125,26 @@ export default function PaginaAdmin() {
     const intervalo = setInterval(() => void refrescar(), 10_000);
     return () => clearInterval(intervalo);
   }, [token, refrescar]);
+
+  const refrescarVigilancia = useCallback(async () => {
+    const r = await api('/admin/vigilancia');
+    if (r?.ok) setVigilancia(await r.json());
+  }, [api]);
+
+  // La sala de vigilancia se refresca más a menudo (cada 3 s) y solo cuando
+  // su pestaña está abierta.
+  useEffect(() => {
+    if (!token || pestana !== 'vigilancia') return;
+    void refrescarVigilancia();
+    const intervalo = setInterval(() => void refrescarVigilancia(), 3_000);
+    return () => clearInterval(intervalo);
+  }, [token, pestana, refrescarVigilancia]);
+
+  async function banearVigilancia(sessionId: string) {
+    const r = await api(`/admin/vigilancia/${sessionId}/banear`, { method: 'POST' });
+    if (r && !r.ok) setError('No se pudo banear (quizá ya se desconectó).');
+    await refrescarVigilancia();
+  }
 
   async function entrar(evento: React.FormEvent) {
     evento.preventDefault();
@@ -195,6 +231,9 @@ export default function PaginaAdmin() {
           </button>
           <button onClick={() => setPestana('baneos')} className={clasePestana(pestana === 'baneos')}>
             Baneos ({baneos.length})
+          </button>
+          <button onClick={() => setPestana('vigilancia')} className={clasePestana(pestana === 'vigilancia')}>
+            Vigilancia
           </button>
           <button onClick={() => setPestana('metricas')} className={clasePestana(pestana === 'metricas')}>
             Métricas
@@ -314,6 +353,57 @@ export default function PaginaAdmin() {
               ))}
             </tbody>
           </table>
+        </section>
+      )}
+
+      {pestana === 'vigilancia' && (
+        <section aria-label="Sala de vigilancia" className="space-y-3">
+          {vigilancia && !vigilancia.activa && (
+            <p className="rounded-xl bg-amber-500/10 p-4 text-sm text-amber-300">
+              La supervisión está desactivada en el servidor (VIGILANCIA=off).
+            </p>
+          )}
+          {vigilancia && vigilancia.activa && vigilancia.rooms.length === 0 && (
+            <p className="rounded-xl bg-slate-900 p-6 text-center text-slate-400">
+              No hay videollamadas activas en este momento.
+            </p>
+          )}
+          <p className="text-xs text-slate-500">
+            Capturas de las salas de vídeo activas (se actualizan cada pocos
+            segundos). Los usuarios ven el aviso de moderación activa.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {vigilancia?.rooms.map((sala) =>
+              [sala.a, sala.b].map((p) => (
+                <article key={p.sessionId} className="overflow-hidden rounded-xl bg-slate-900">
+                  {p.frame ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={p.frame}
+                      alt={`Captura en vivo de la sesión ${p.sessionId}`}
+                      className="aspect-video w-full bg-black object-cover"
+                    />
+                  ) : (
+                    <div className="flex aspect-video w-full items-center justify-center bg-slate-800 text-xs text-slate-500">
+                      Sin captura reciente
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2 p-2">
+                    <span className="truncate text-xs text-slate-400">
+                      {p.pais ? `📍 ${p.pais} · ` : ''}
+                      {p.sessionId.slice(0, 8)}
+                    </span>
+                    <button
+                      onClick={() => void banearVigilancia(p.sessionId)}
+                      className="flex-none rounded-lg bg-rose-600 px-3 py-1 text-xs font-semibold transition hover:bg-rose-500"
+                    >
+                      Banear
+                    </button>
+                  </div>
+                </article>
+              )),
+            )}
+          </div>
         </section>
       )}
 

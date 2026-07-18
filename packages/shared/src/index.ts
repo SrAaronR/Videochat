@@ -59,6 +59,12 @@ export interface MatchEncontrado {
   interesesComunes: string[];
   /** País detectado del desconocido (ISO-3166 alpha-2) o null. */
   paisPeer: string | null;
+  /**
+   * true si la moderación con supervisión está activa: el cliente enviará
+   * capturas periódicas de su cámara al panel de moderación y debe mostrar
+   * el aviso de "moderación activa". Cuando es false no se envía nada.
+   */
+  supervisado: boolean;
 }
 
 /** Motivos por los que el peer abandona la sala. */
@@ -130,6 +136,11 @@ export interface ClientToServerEvents {
   denunciar: (denuncia: PayloadDenuncia) => void;
   /** El detector NSFW local superó el umbral (el servidor decide). */
   nsfw_alerta: (alerta: PayloadAlertaNsfw) => void;
+  /**
+   * Captura periódica de la cámara local para la sala de vigilancia del
+   * panel de moderación. Solo se envía si el match indicó `supervisado`.
+   */
+  vigilancia_frame: (data: { frame: string | null }) => void;
 }
 
 /** Longitud máxima de un mensaje de chat aceptada por el servidor. */

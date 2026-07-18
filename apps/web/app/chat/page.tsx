@@ -117,6 +117,8 @@ export default function PaginaChat() {
   const [baneo, setBaneo] = useState<InfoBan | null>(null);
   /** Banner de moderación (aviso NSFW, mensaje bloqueado, confirmaciones). */
   const [banner, setBanner] = useState<Banner | null>(null);
+  /** true si la sesión está bajo supervisión (muestra el aviso de moderación). */
+  const [supervisado, setSupervisado] = useState(false);
   /** Posición del video local tras arrastrarlo (null = esquina por defecto). */
   const [posLocal, setPosLocal] = useState<{ x: number; y: number } | null>(null);
 
@@ -136,6 +138,8 @@ export default function PaginaChat() {
   const arrastreRef = useRef<{ dx: number; dy: number } | null>(null);
   const inicioSwipeRef = useRef<{ x: number; y: number } | null>(null);
   const timeoutBannerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Intervalo que envía capturas de vigilancia mientras la sesión es supervisada. */
+  const intervaloVigilanciaRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const modoTexto = criterios?.modo === 'texto';
 
@@ -158,6 +162,12 @@ export default function PaginaChat() {
       timeoutConexionRef.current = null;
     }
     candidatosPendientesRef.current = [];
+    // Detener el envío de capturas de vigilancia al terminar la sala.
+    if (intervaloVigilanciaRef.current) {
+      clearInterval(intervaloVigilanciaRef.current);
+      intervaloVigilanciaRef.current = null;
+    }
+    setSupervisado(false);
     const pc = pcRef.current;
     if (pc) {
       pc.onicecandidate = null;
@@ -396,7 +406,7 @@ export default function PaginaChat() {
 
       socket.on('buscando', () => cambiarEstado('buscando'));
 
-      socket.on('match_found', ({ initiator, interesesComunes, paisPeer, modo }) => {
+      socket.on('match_found', ({ initiator, interesesComunes, paisPeer, modo, supervisado: sup }) => {
         if (timeoutRebusquedaRef.current) {
           clearTimeout(timeoutRebusquedaRef.current);
           timeoutRebusquedaRef.current = null;
@@ -405,6 +415,17 @@ export default function PaginaChat() {
         setPeerEscribiendo(false);
         setAviso(null);
         setInfoMatch({ interesesComunes, paisPeer });
+        setSupervisado(sup);
+
+        // Sala de vigilancia: si la sesión está supervisada, se envían
+        // capturas periódicas de la cámara local al panel de moderación.
+        // El usuario ve el aviso de "moderación activa" (transparencia).
+        if (intervaloVigilanciaRef.current) clearInterval(intervaloVigilanciaRef.current);
+        if (sup && modo === 'video') {
+          intervaloVigilanciaRef.current = setInterval(() => {
+            socket?.emit('vigilancia_frame', { frame: capturarFrame(videoLocalRef.current) });
+          }, 4000);
+        }
 
         // En modo texto no hay WebRTC: el match ya es la conexión.
         if (modo === 'texto') {
@@ -652,6 +673,19 @@ export default function PaginaChat() {
     </p>
   ) : null;
 
+  // Aviso persistente de supervisión (transparencia: la sesión puede estar
+  // siendo revisada por moderación por seguridad).
+  const avisoSupervision = supervisado ? (
+    <div
+      role="note"
+      className="pointer-events-none absolute inset-x-0 top-0 z-20 flex justify-center p-2"
+    >
+      <span className="rounded-full bg-slate-950/80 px-3 py-1 text-xs font-medium text-amber-200 backdrop-blur">
+        🛡️ Moderación activa por seguridad — esta sesión puede ser supervisada
+      </span>
+    </div>
+  ) : null;
+
   // --- Pantallas especiales ---
 
   // Suspensión: pantalla completa con motivo y duración, sin acceso al chat.
@@ -893,6 +927,7 @@ export default function PaginaChat() {
           </p>
         )}
         {bannerJsx}
+        {avisoSupervision}
 
         {/* Video local en esquina, arrastrable */}
         <div

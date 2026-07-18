@@ -234,7 +234,8 @@ export default function PaginaInicio() {
           <Link href="/normas" className="hover:text-slate-200">Normas de la comunidad</Link>
         </nav>
         <p className="mt-3 text-center text-xs text-slate-600">
-          Servicio solo para mayores de 18 años. El video no se graba.
+          Servicio solo para mayores de 18 años. El vídeo no se graba, pero por
+          seguridad la moderación puede supervisar las sesiones.
         </p>
       </footer>
     </div>

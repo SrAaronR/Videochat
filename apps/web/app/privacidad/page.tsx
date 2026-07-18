@@ -35,10 +35,15 @@ export default function PaginaPrivacidad() {
           </li>
           <li>
             <strong>Video y audio:</strong> viajan cifrados de navegador a
-            navegador (WebRTC, DTLS-SRTP) y NO se graban ni se almacenan.
-            Única excepción: al denunciar a alguien (o cuando el detector
-            automático se activa) se captura una imagen fija como evidencia,
-            que revisa el equipo de moderación.
+            navegador (WebRTC, DTLS-SRTP) y NO se graban ni se almacenan como
+            vídeo. Excepciones para moderación: al denunciar a alguien (o
+            cuando el detector automático se activa) se captura una imagen
+            fija como evidencia; y, cuando la supervisión está activa, se
+            toman <strong>capturas periódicas de tu cámara</strong> que el
+            equipo de moderación puede revisar en tiempo casi real para
+            garantizar la seguridad de la comunidad. Verás siempre un aviso
+            de &quot;moderación activa&quot; cuando esto ocurra. Estas
+            imágenes se usan solo para moderación y no se publican.
           </li>
           <li>
             <strong>Denuncias y bloqueos:</strong> guardamos la denuncia, la

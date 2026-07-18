@@ -110,6 +110,17 @@ const VENTANA_INTERESES_MS = Number(process.env.VENTANA_INTERESES_MS ?? 15_000);
  * dejar al usuario esperando mucho si no hay nadie de ese país.
  */
 const VENTANA_PAIS_MS = Number(process.env.VENTANA_PAIS_MS ?? 6_000);
+
+/**
+ * Supervisión (sala de vigilancia): si está activa, cada cliente envía
+ * capturas periódicas de su cámara al panel de moderación y se le muestra
+ * un aviso de "moderación activa". Por defecto ACTIVA. Requiere declararlo
+ * a los usuarios (aviso en la sala + Términos/Privacidad). Desactívala con
+ * VIGILANCIA=off.
+ */
+const VIGILANCIA_ACTIVA = (process.env.VIGILANCIA ?? 'on').toLowerCase() !== 'off';
+/** Antigüedad máxima (ms) de una captura de vigilancia para mostrarse. */
+const TTL_FRAME_VIGILANCIA_MS = 20_000;
 /** Cadencia del paso periódico de emparejamiento. */
 const INTERVALO_PASO_MS = 2_000;
 /** Cuántos matches recientes no se repiten. */
@@ -150,6 +161,9 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
 
 /** Salas activas en memoria (ver nota de deuda técnica en la cabecera). */
 const salas = new Map<string, Sala>();
+
+/** Última captura de vigilancia por socket (para la sala de vigilancia). */
+const framesVigilancia = new Map<string, { frame: string; ts: number }>();
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -272,6 +286,9 @@ function emparejar(entradaA: Esperando, entradaB: Esperando, modo: ModoChat): vo
 
   void incrementarMetrica(redis, 'matches');
 
+  // Solo se supervisa el vídeo (en modo texto no hay cámara).
+  const supervisado = VIGILANCIA_ACTIVA && modo === 'video';
+
   // El que más tiempo llevaba esperando (entradaA) es el initiator WebRTC.
   a.emit('match_found', {
     roomId,
@@ -280,6 +297,7 @@ function emparejar(entradaA: Esperando, entradaB: Esperando, modo: ModoChat): vo
     modo,
     interesesComunes: comunes,
     paisPeer: entradaB.pais,
+    supervisado,
   });
   b.emit('match_found', {
     roomId,
@@ -288,6 +306,7 @@ function emparejar(entradaA: Esperando, entradaB: Esperando, modo: ModoChat): vo
     modo,
     interesesComunes: comunes,
     paisPeer: entradaA.pais,
+    supervisado,
   });
 }
 
@@ -427,6 +446,7 @@ function abandonarSala(socket: SocketChat, motivo: MotivoSalida): void {
   const peer = obtenerPeer(socket);
   salas.delete(roomId);
   socket.data.roomId = undefined;
+  framesVigilancia.delete(socket.id);
   void socket.leave(roomId);
 
   if (peer) {
@@ -461,6 +481,40 @@ async function salirDeCola(socket: SocketChat): Promise<void> {
   }
 }
 
+/**
+ * Construye el estado de la sala de vigilancia: una entrada por sala activa
+ * con la última captura de cada participante (si es reciente), su país e
+ * identidad para poder banear desde el panel.
+ */
+function estadoVigilancia() {
+  const ahora = Date.now();
+  const captura = (id: string) => {
+    const f = framesVigilancia.get(id);
+    return f && ahora - f.ts < TTL_FRAME_VIGILANCIA_MS ? f.frame : null;
+  };
+  const participante = (id: string) => {
+    const s = io.sockets.sockets.get(id) as SocketChat | undefined;
+    return {
+      sessionId: id,
+      pais: s?.data.pais ?? null,
+      frame: captura(id),
+    };
+  };
+  const rooms = [];
+  for (const [roomId, sala] of salas) {
+    rooms.push({ roomId, a: participante(sala.a), b: participante(sala.b) });
+  }
+  return { activa: VIGILANCIA_ACTIVA, rooms };
+}
+
+/** Banea directamente a un socket por su sessionId (acción del panel). */
+async function banearPorSesion(sessionId: string, motivo: string): Promise<boolean> {
+  const socket = io.sockets.sockets.get(sessionId) as SocketChat | undefined;
+  if (!socket) return false;
+  await banearSocket(socket, motivo);
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Moderación
 // ---------------------------------------------------------------------------
@@ -478,6 +532,13 @@ function decodificarFrame(frame: unknown): Uint8Array<ArrayBuffer> | null {
   } catch {
     return null;
   }
+}
+
+/** Valida un data-URI JPEG y lo devuelve tal cual (para servirlo al panel). */
+function decodificarFrameDataUri(frame: unknown): string | null {
+  if (typeof frame !== 'string') return null;
+  if (frame.length > MAX_BYTES_FRAME) return null;
+  return frame.startsWith('data:image/jpeg;base64,') ? frame : null;
 }
 
 /** Banea al socket dado: registra, notifica y desconecta. */
@@ -698,6 +759,15 @@ io.on('connection', (socket: SocketChat) => {
     })().catch((err) => console.error('[moderacion] error en nsfw_alerta:', err));
   });
 
+  // Captura periódica de la cámara para la sala de vigilancia del panel.
+  // Solo se acepta si la supervisión está activa y el socket está en una sala.
+  socket.on('vigilancia_frame', (data) => {
+    if (!VIGILANCIA_ACTIVA || !socket.data.roomId) return;
+    const frame = decodificarFrameDataUri((data as { frame?: unknown } | null)?.frame);
+    if (!frame) return;
+    framesVigilancia.set(socket.id, { frame, ts: Date.now() });
+  });
+
   socket.on('next', () => {
     abandonarSala(socket, 'siguiente');
     const criterios = socket.data.criterios ?? sanearCriterios(null);
@@ -733,6 +803,8 @@ app.use(
       for (const modo of MODOS) tamanos[modo] = await redis.hlen(claveCola(modo));
       return tamanos;
     },
+    estadoVigilancia,
+    banearPorSesion,
   }),
 );
 

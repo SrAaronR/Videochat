@@ -26,6 +26,17 @@ interface OpcionesAdmin {
   desconectarBaneados: (ipHash: string | null, fingerprint: string | null, motivo: string, hasta: number | null) => void;
   /** Tamaños actuales de las colas de emparejamiento. */
   tamanosColas: () => Promise<Record<string, number>>;
+  /** Estado de la sala de vigilancia (salas activas con sus capturas). */
+  estadoVigilancia: () => {
+    activa: boolean;
+    rooms: Array<{
+      roomId: string;
+      a: { sessionId: string; pais: string | null; frame: string | null };
+      b: { sessionId: string; pais: string | null; frame: string | null };
+    }>;
+  };
+  /** Banea directamente a un socket por su sessionId. Devuelve si existía. */
+  banearPorSesion: (sessionId: string, motivo: string) => Promise<boolean>;
 }
 
 /** Middleware: exige un JWT válido en Authorization: Bearer. */
@@ -50,7 +61,7 @@ function frameADataUri(frame: Uint8Array | null): string | null {
   return `data:image/jpeg;base64,${Buffer.from(frame).toString('base64')}`;
 }
 
-export function crearRouterAdmin({ redis, io, desconectarBaneados, tamanosColas }: OpcionesAdmin): Router {
+export function crearRouterAdmin({ redis, io, desconectarBaneados, tamanosColas, estadoVigilancia, banearPorSesion }: OpcionesAdmin): Router {
   const router = Router();
 
   router.post('/login', (req, res) => {
@@ -176,6 +187,23 @@ export function crearRouterAdmin({ redis, io, desconectarBaneados, tamanosColas 
       denunciasHoraActual: Number(denunciasActual ?? 0),
       denunciasHoraAnterior: Number(denunciasAnterior ?? 0),
     });
+  });
+
+  // --- Sala de vigilancia -----------------------------------------------------
+
+  // Estado en vivo: salas activas con la última captura de cada participante.
+  router.get('/vigilancia', (_req, res) => {
+    res.json(estadoVigilancia());
+  });
+
+  // Banear directamente a un participante desde la sala de vigilancia.
+  router.post('/vigilancia/:sessionId/banear', async (req, res) => {
+    const ok = await banearPorSesion(req.params.sessionId, 'Baneado desde la sala de vigilancia');
+    if (!ok) {
+      res.status(404).json({ error: 'La sesión ya no está conectada' });
+      return;
+    }
+    res.json({ ok: true });
   });
 
   return router;
