@@ -15,8 +15,10 @@ RUN npm ci --workspace apps/signaling --workspace packages/shared
 COPY packages/shared packages/shared
 COPY apps/signaling apps/signaling
 
-# Cliente Prisma para el esquema de moderación.
-RUN npx prisma generate --schema apps/signaling/prisma/schema.prisma
+# Cliente Prisma para el esquema de moderación. Se invoca a través de un
+# script de npm (no `npx`) para que npm resuelva el binario de prisma del
+# workspace en el PATH — igual que hace `start:docker` en tiempo de ejecución.
+RUN npm run db:generate --workspace apps/signaling
 
 ENV NODE_ENV=production
 EXPOSE 4000
