@@ -57,6 +57,13 @@ import {
   sanearFingerprint,
 } from './moderacion.js';
 import { crearRouterAdmin } from './admin.js';
+import {
+  consultarVerificacion,
+  crearSesionVerificacion,
+  emitirTokenEdad,
+  proveedorEdadActivo,
+  validarTokenEdad,
+} from './verificacionEdad.js';
 
 /** Datos que colgamos de cada socket conectado. */
 interface DatosSocket {
@@ -74,6 +81,8 @@ interface DatosSocket {
   ipHash: string;
   /** Fingerprint del navegador enviado por el cliente (o null). */
   fingerprint: string | null;
+  /** true si el handshake presentó un token de edad válido. */
+  edadVerificada: boolean;
 }
 
 type SocketChat = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, DatosSocket>;
@@ -149,6 +158,68 @@ app.use(cors({ origin: ORIGENES }));
 app.use(express.json({ limit: '1mb' }));
 app.get('/health', (_req, res) => {
   res.json({ ok: true });
+});
+
+// --- HTTP: verificación de edad ---------------------------------------------
+// El flujo completo vive en verificacionEdad.ts (candado "falla cerrada").
+// La web usa estas rutas desde /verificar-edad.
+
+/** Origen del frontend validado contra CORS_ORIGIN (evita open redirect). */
+function origenPermitido(bruto: unknown): string {
+  const candidato = typeof bruto === 'string' ? bruto.replace(/\/$/, '') : '';
+  return ORIGENES.includes(candidato) ? candidato : ORIGENES[0]!;
+}
+
+// Qué proveedor hay configurado (la web decide qué UI mostrar).
+app.get('/verificacion/estado-proveedor', (_req, res) => {
+  const proveedor = proveedorEdadActivo();
+  res.json({ proveedor, activo: proveedor !== null });
+});
+
+// Crea una sesión de verificación y devuelve la URL a la que redirigir.
+app.post('/verificacion/crear', (req, res) => {
+  void (async () => {
+    const proveedor = proveedorEdadActivo();
+    if (!proveedor) {
+      res.status(503).json({
+        error:
+          'La verificación de edad no está configurada en el servidor. ' +
+          'Sin ella el chat permanece cerrado (PROVEEDOR_EDAD, AGE_JWT_SECRET).',
+      });
+      return;
+    }
+    const origen = origenPermitido((req.body as { origen?: unknown } | undefined)?.origen);
+    const sesion = await crearSesionVerificacion(redis, origen);
+    if (!sesion) {
+      res.status(503).json({ error: 'La verificación de edad no está disponible.' });
+      return;
+    }
+    res.json(sesion);
+  })().catch((err) => {
+    console.error('[verificacion] error creando sesión:', err);
+    res.status(502).json({ error: 'No se pudo iniciar la verificación. Inténtalo de nuevo.' });
+  });
+});
+
+// Estado de una sesión; al pasar a verificada se emite el token de edad.
+// `aprobarTest=1` solo tiene efecto con el proveedor 'test' (simulación).
+app.get('/verificacion/estado', (req, res) => {
+  void (async () => {
+    const sesionId = typeof req.query.sesionId === 'string' ? req.query.sesionId : '';
+    if (!/^[0-9a-f-]{36}$/.test(sesionId)) {
+      res.status(400).json({ error: 'sesionId inválido' });
+      return;
+    }
+    const estado = await consultarVerificacion(redis, sesionId, req.query.aprobarTest === '1');
+    if (estado === 'verificada') {
+      res.json({ estado, token: emitirTokenEdad() });
+      return;
+    }
+    res.json({ estado });
+  })().catch((err) => {
+    console.error('[verificacion] error consultando estado:', err);
+    res.status(502).json({ error: 'No se pudo consultar la verificación.' });
+  });
 });
 
 const httpServer = createServer(app);
@@ -605,6 +676,9 @@ io.use((generico, next) => {
   const socket = generico as SocketChat;
   socket.data.ipHash = hashIp(ipDelSocket(socket));
   socket.data.fingerprint = sanearFingerprint(socket.handshake.auth?.fingerprint);
+  // Candado de edad: sin token válido en el handshake el socket puede
+  // conectar (para recibir el aviso), pero find_match/next no emparejan.
+  socket.data.edadVerificada = validarTokenEdad(socket.handshake.auth?.ageToken);
 
   consultarBan(redis, socket.data.ipHash, socket.data.fingerprint)
     .then((ban) => {
@@ -628,6 +702,11 @@ io.on('connection', (socket: SocketChat) => {
   socket.data.pais = detectarPais(socket);
 
   socket.on('find_match', (criteriosBrutos) => {
+    // Candado de verificación de edad: sin token válido NO se empareja.
+    if (!socket.data.edadVerificada) {
+      socket.emit('verificacion_requerida');
+      return;
+    }
     const criterios = sanearCriterios(criteriosBrutos);
     void encolar(socket, criterios).catch((err) => {
       console.error('[matchmaking] error:', err);
@@ -769,6 +848,11 @@ io.on('connection', (socket: SocketChat) => {
   });
 
   socket.on('next', () => {
+    // Mismo candado de edad que en find_match.
+    if (!socket.data.edadVerificada) {
+      socket.emit('verificacion_requerida');
+      return;
+    }
     abandonarSala(socket, 'siguiente');
     const criterios = socket.data.criterios ?? sanearCriterios(null);
     void encolar(socket, criterios).catch((err) => {
@@ -816,4 +900,17 @@ void recargarBanesActivos(redis).catch((err) =>
 
 httpServer.listen(PUERTO, () => {
   console.log(`[signaling] escuchando en puerto ${PUERTO} (redis: ${REDIS_URL})`);
+  const proveedorEdad = proveedorEdadActivo();
+  if (proveedorEdad === 'test') {
+    console.warn(
+      '[verificacion] ⚠ proveedor TEST activo: SIMULA la verificación de edad, no la realiza. Solo desarrollo.',
+    );
+  } else if (proveedorEdad) {
+    console.log(`[verificacion] proveedor de edad activo: ${proveedorEdad}`);
+  } else {
+    console.warn(
+      '[verificacion] ⚠ SIN proveedor de verificación de edad: nadie podrá emparejarse ' +
+        '(falla cerrada). Configura PROVEEDOR_EDAD + AGE_JWT_SECRET (+ STRIPE_SECRET_KEY).',
+    );
+  }
 });

@@ -31,6 +31,7 @@ import {
 import PanelChat, { type MensajeUI } from '@/components/PanelChat';
 import { estaAceptado, guardarAceptacion } from '@/lib/aceptacion';
 import { obtenerFingerprint } from '@/lib/identidad';
+import { obtenerTokenEdad } from '@/lib/verificacionEdad';
 import { capturarFrame, iniciarMuestreoNsfw } from '@/lib/moderacion';
 import { nombrePais } from '@/lib/paises';
 import {
@@ -343,11 +344,13 @@ export default function PaginaChat() {
       if (cancelado) return;
 
       // 3) Socket de señalización (reconexión automática con backoff).
+      // El token de edad viaja en el handshake: sin él el servidor responde
+      // a find_match/next con `verificacion_requerida` y no empareja.
       socket = io(URL_SIGNALING, {
         transports: ['websocket', 'polling'],
         reconnectionDelay: 1000,
         reconnectionDelayMax: 10000,
-        auth: { fingerprint },
+        auth: { fingerprint, ageToken: obtenerTokenEdad() },
       });
       socketRef.current = socket;
 
@@ -380,6 +383,12 @@ export default function PaginaChat() {
 
       socket.on('denuncia_recibida', () => {
         mostrarBanner({ tono: 'ok', texto: 'Denuncia enviada. Gracias por ayudar a mantener la comunidad segura.' });
+      });
+
+      // El servidor exige verificación de edad: se abandona la sala y se
+      // lleva al usuario al flujo de verificación.
+      socket.on('verificacion_requerida', () => {
+        router.replace('/verificar-edad');
       });
 
       // 4) Muestreo NSFW del video local (solo modo video): si supera el

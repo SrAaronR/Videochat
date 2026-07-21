@@ -14,6 +14,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import type { ModoChat } from '@videochat/shared';
 import { estaAceptado, guardarAceptacion } from '@/lib/aceptacion';
+import { obtenerTokenEdad } from '@/lib/verificacionEdad';
 import { Logo } from '@/components/Logo';
 import { PAISES } from '@/lib/paises';
 
@@ -38,6 +39,8 @@ export default function PaginaInicio() {
   const [pais, setPais] = useState('');
   const [aceptado, setAceptado] = useState(false);
   const [avisoGate, setAvisoGate] = useState(false);
+  /** true si hay un token de verificación de edad vigente en este navegador. */
+  const [edadVerificada, setEdadVerificada] = useState(false);
 
   // Restaurar preferencias y aceptación previa.
   useEffect(() => {
@@ -53,6 +56,7 @@ export default function PaginaInicio() {
       // Preferencias corruptas: se ignoran.
     }
     setAceptado(estaAceptado());
+    setEdadVerificada(obtenerTokenEdad() !== null);
   }, []);
 
   function empezar() {
@@ -69,6 +73,13 @@ export default function PaginaInicio() {
       );
     } catch {
       // localStorage lleno o bloqueado: no es crítico.
+    }
+    // Gate de edad: sin token de verificación, primero a /verificar-edad
+    // (el candado real está en el servidor; esto evita entrar a una sala
+    // que no va a emparejar).
+    if (!edadVerificada) {
+      router.push('/verificar-edad');
+      return;
     }
     const params = new URLSearchParams();
     params.set('modo', modo);
@@ -211,6 +222,21 @@ export default function PaginaInicio() {
             <p role="alert" className="text-sm text-rose-400">
               Debes confirmar que eres mayor de edad y aceptar los términos
               para continuar.
+            </p>
+          )}
+
+          {/* Estado de la verificación de edad (el candado real es del servidor). */}
+          {edadVerificada ? (
+            <p className="rounded-xl border border-emerald-700 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+              ✔ Edad verificada en este navegador.
+            </p>
+          ) : (
+            <p className="rounded-xl border border-slate-700 bg-slate-900 p-3 text-sm text-slate-400">
+              Además de aceptar los términos, tendrás que{' '}
+              <Link href="/verificar-edad" className="text-indigo-400 underline hover:text-indigo-300">
+                verificar tu edad
+              </Link>{' '}
+              (documento + selfie) antes de poder chatear.
             </p>
           )}
         </div>

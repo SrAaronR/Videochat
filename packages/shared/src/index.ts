@@ -116,6 +116,12 @@ export interface ServerToClientEvents {
   aviso_moderacion: (aviso: AvisoModeracion) => void;
   /** Confirmación de que la denuncia se registró. */
   denuncia_recibida: () => void;
+  /**
+   * El socket intentó buscar pareja sin un token de edad válido: el cliente
+   * debe llevar al usuario a /verificar-edad. El servidor NUNCA empareja a
+   * quien no lo presenta (candado de verificación de edad).
+   */
+  verificacion_requerida: () => void;
 }
 
 /** Eventos que el cliente emite hacia el servidor. */

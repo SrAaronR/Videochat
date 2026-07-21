@@ -193,6 +193,28 @@ Documentadas en [`.env.example`](./.env.example). Las relevantes en Fase 1:
 | `TERMINOS_PROHIBIDOS` | Términos bloqueados en el chat, separados por comas. |
 | `RATE_*` | Límites por IP: búsquedas/min, mensajes/s, denuncias/min. |
 | `NEXT_PUBLIC_NSFW_*` | Umbral, intervalo y URL del modelo del detector NSFW. |
+| `PROVEEDOR_EDAD`, `AGE_JWT_SECRET`, `STRIPE_SECRET_KEY` | Verificación de edad (ver sección siguiente). |
+
+## Verificación de edad (candado de lanzamiento)
+
+El servidor **no empareja a nadie** que no presente un token de edad: un JWT
+firmado con `AGE_JWT_SECRET` que solo se emite tras superar una verificación
+real con un proveedor externo. El diseño "falla cerrada": sin proveedor
+configurado, nadie puede usar el chat.
+
+- Flujo: la web (`/verificar-edad`) llama a `POST /verificacion/crear` en el
+  signaling → redirige a la página del proveedor → al volver hace polling de
+  `GET /verificacion/estado` → cuando el proveedor confirma, recibe el token
+  y lo guarda en `localStorage`; el socket lo envía en el handshake
+  (`auth.ageToken`). Sin token válido, `find_match`/`next` responden con el
+  evento `verificacion_requerida` y el cliente redirige a `/verificar-edad`.
+- Proveedores (en `apps/signaling/src/verificacionEdad.ts`):
+  - `stripe` — Stripe Identity (documento + selfie). Requiere
+    `STRIPE_SECRET_KEY` con Identity activado. Es el modo para producción.
+  - `test` — **simula** la verificación (no comprueba nada). Solo para
+    desarrollo; exige además `PERMITIR_VERIFICACION_TEST=si-entiendo-que-no-verifica-edad`.
+- Para otros proveedores (Yoti, Veriff, Persona…), implementa su adaptador
+  en `verificacionEdad.ts` siguiendo el patrón de Stripe.
 
 ## Decisiones de arquitectura
 

@@ -44,6 +44,13 @@ services:
       # Ventanas de emparejamiento (ms): intereses y país (preferencia con margen).
       VENTANA_INTERESES_MS: ${VENTANA_INTERESES_MS:-15000}
       VENTANA_PAIS_MS: ${VENTANA_PAIS_MS:-6000}
+      # Verificación de edad (ver .env.example). Sin proveedor válido el
+      # servidor no empareja a nadie (falla cerrada).
+      PROVEEDOR_EDAD: ${PROVEEDOR_EDAD:-}
+      AGE_JWT_SECRET: ${AGE_JWT_SECRET:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      PERMITIR_VERIFICACION_TEST: ${PERMITIR_VERIFICACION_TEST:-}
+      EDAD_TOKEN_DIAS: ${EDAD_TOKEN_DIAS:-30}
     ports:
       - '4000:4000'
     depends_on:
