@@ -8,7 +8,13 @@
 #        app.tudominio.com   senal.tudominio.com   turn.tudominio.com
 #
 # Uso (como root, desde la raíz del repositorio clonado):
-#   sudo bash deploy/instalar-vps.sh tudominio.com
+#   sudo bash deploy/instalar-vps.sh tudominio.com [sk_live_...]
+#
+# El segundo argumento (opcional) es la clave secreta de Stripe con Identity
+# activado, para la verificación de edad; también se puede pasar como
+# variable de entorno STRIPE_SECRET_KEY. SIN ella el servicio arranca con el
+# candado cerrado: nadie puede emparejarse hasta configurar un proveedor de
+# verificación de edad en .env (diseño "falla cerrada").
 #
 # Qué hace: instala Docker si falta, genera todas las contraseñas y las
 # escribe en .env, crea el Caddyfile con tus dominios, abre el firewall,
@@ -37,6 +43,14 @@ fi
 DOMINIO_WEB="app.${DOMINIO_BASE}"
 DOMINIO_SENAL="senal.${DOMINIO_BASE}"
 DOMINIO_TURN="turn.${DOMINIO_BASE}"
+
+# Verificación de edad: clave de Stripe por argumento o por entorno.
+STRIPE_SECRET_KEY="${2:-${STRIPE_SECRET_KEY:-}}"
+if [[ -n "$STRIPE_SECRET_KEY" ]]; then
+  PROVEEDOR_EDAD=stripe
+else
+  PROVEEDOR_EDAD=
+fi
 
 if [[ -f .env ]]; then
   echo "ERROR: ya existe un .env. Si quieres regenerarlo, muévelo antes:" >&2
@@ -69,6 +83,7 @@ POSTGRES_PASSWORD=$(gen 16)
 ADMIN_JWT_SECRET=$(gen 32)
 HASH_SALT=$(gen 16)
 TURN_PASSWORD=$(gen 12)
+AGE_JWT_SECRET=$(gen 32)
 
 cat > .env <<EOF
 # Generado por deploy/instalar-vps.sh el $(date -Is)
@@ -107,6 +122,17 @@ NEXT_PUBLIC_TURN_PASSWORD=${TURN_PASSWORD}
 # --- Matchmaking (valores de producción) ---
 PAIS_POR_DEFECTO=
 VENTANA_INTERESES_MS=15000
+
+# --- Verificación de edad (candado de lanzamiento) ---
+# Sin proveedor configurado NADIE puede emparejarse (falla cerrada).
+# Para activarla: PROVEEDOR_EDAD=stripe + STRIPE_SECRET_KEY con Identity
+# activado, y reinicia el signaling. El modo 'test' NO verifica nada y no
+# debe usarse en un servidor público.
+PROVEEDOR_EDAD=${PROVEEDOR_EDAD}
+AGE_JWT_SECRET=${AGE_JWT_SECRET}
+STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
+PERMITIR_VERIFICACION_TEST=
+EDAD_TOKEN_DIAS=30
 EOF
 chmod 600 .env
 
@@ -157,6 +183,16 @@ echo "  Panel de admin:   https://${DOMINIO_WEB}/admin"
 echo "  Contraseña admin: ${ADMIN_PASSWORD}"
 echo
 echo "  (Todas las credenciales quedan guardadas en .env)"
+echo
+if [[ -n "$STRIPE_SECRET_KEY" ]]; then
+  echo "  Verificación de edad: ACTIVA con Stripe Identity."
+else
+  echo "  ⚠ VERIFICACIÓN DE EDAD SIN CONFIGURAR: el chat está CERRADO"
+  echo "    (nadie puede emparejarse hasta configurarla). Para activarla:"
+  echo "      1. Crea una cuenta en Stripe y activa Identity."
+  echo "      2. En .env: PROVEEDOR_EDAD=stripe y STRIPE_SECRET_KEY=sk_live_..."
+  echo "      3. docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d signaling"
+fi
 echo
 echo "Caddy tardará ~1 minuto en emitir los certificados HTTPS la"
 echo "primera vez. Comprueba:"

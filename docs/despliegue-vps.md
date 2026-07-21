@@ -6,11 +6,12 @@ cámara bajo HTTPS).
 
 ## Opción rápida: script automático (~10 minutos)
 
-Con el DNS del paso 1 ya configurado, en el VPS (como root):
+Con el DNS del paso 1 ya configurado y la clave de Stripe del paso 2.5 a
+mano, en el VPS (como root):
 
 ```bash
 git clone <URL_DEL_REPO> videochat && cd videochat
-sudo bash deploy/instalar-vps.sh tudominio.com
+sudo bash deploy/instalar-vps.sh tudominio.com sk_live_TU_CLAVE_DE_STRIPE
 ```
 
 El script instala Docker si falta, genera todas las contraseñas (quedan en
@@ -18,6 +19,11 @@ El script instala Docker si falta, genera todas las contraseñas (quedan en
 Caddyfile con tus dominios, abre el firewall y levanta todo con
 `docker-compose.prod.yml` (Caddy + HTTPS automático + coturn con IP
 pública). Al terminar: `https://app.tudominio.com`.
+
+Si omites la clave de Stripe, todo arranca igualmente pero **el chat queda
+cerrado**: la verificación de edad "falla cerrada" y el servidor no
+empareja a nadie hasta que la configures en `.env` (el propio script te
+imprime los pasos al final).
 
 El resto de esta guía explica los mismos pasos a mano, por si prefieres
 controlarlos uno a uno o algo falla.
@@ -71,10 +77,46 @@ NEXT_PUBLIC_TURN_PASSWORD=<el mismo TURN_PASSWORD>
 # Producción: sin país por defecto (GeoIP real) y ventana estándar
 PAIS_POR_DEFECTO=
 VENTANA_INTERESES_MS=15000
+
+# Verificación de edad (OBLIGATORIA — ver paso 2.5)
+PROVEEDOR_EDAD=stripe
+AGE_JWT_SECRET=...            # genera con: openssl rand -hex 32
+STRIPE_SECRET_KEY=sk_live_...
+PERMITIR_VERIFICACION_TEST=   # vacía SIEMPRE en producción
 ```
 
 > Las variables `NEXT_PUBLIC_*` se INCRUSTAN en el build de la web: si las
 > cambias, ejecuta `docker compose build web` de nuevo.
+
+## 2.5. Verificación de edad (Stripe Identity)
+
+El servidor **no empareja a nadie** sin un token de edad emitido tras una
+verificación real (diseño "falla cerrada" — ver la sección del README).
+Para tenerla operativa:
+
+1. Crea una cuenta en [stripe.com](https://stripe.com) y complétala hasta
+   poder operar en vivo (datos de la entidad responsable del servicio).
+2. Activa **Identity** en el dashboard (Products → Identity). Stripe cobra
+   por verificación realizada; consulta su precio vigente.
+3. Copia la clave secreta en vivo (`sk_live_…`) de Developers → API keys y
+   ponla en `STRIPE_SECRET_KEY`, con `PROVEEDOR_EDAD=stripe`.
+4. Genera un `AGE_JWT_SECRET` propio (`openssl rand -hex 32`). Si lo rotas,
+   todos los usuarios tendrán que verificarse de nuevo.
+
+Comprobación rápida tras arrancar (paso 6):
+
+```bash
+curl https://senal.tudominio.com/verificacion/estado-proveedor
+# → {"proveedor":"stripe","activo":true}
+```
+
+Si devuelve `"activo":false`, revisa los logs del signaling: al arrancar
+imprime exactamente qué falta (`[verificacion] …`).
+
+> **Nunca uses `PROVEEDOR_EDAD=test` en un servidor público**: ese modo
+> SIMULA la verificación (no comprueba ninguna edad) y existe solo para
+> desarrollo local. Por eso exige además la variable
+> `PERMITIR_VERIFICACION_TEST=si-entiendo-que-no-verifica-edad`.
 
 ## 3. Proxy inverso con HTTPS automático (Caddy)
 
@@ -119,17 +161,23 @@ Comprobaciones:
 ```bash
 curl https://senal.tudominio.com/health   # → {"ok":true}
 curl -I https://app.tudominio.com         # → 200
+curl https://senal.tudominio.com/verificacion/estado-proveedor
+#   → {"proveedor":"stripe","activo":true}  (si no, el chat está cerrado)
 ```
 
 ## 7. Prueba desde un móvil real (criterio de aceptación)
 
 1. Abre `https://app.tudominio.com` en el móvil (Chrome Android o Safari iOS).
-2. Marca el gate 18+, pulsa "Empezar a chatear" y concede cámara/micro
+2. Marca el gate 18+ y pulsa "Empezar a chatear": la primera vez te llevará
+   a `/verificar-edad`. Completa la verificación con Stripe (documento +
+   selfie); al confirmar, vuelve sola a la app con el token guardado.
+3. Pulsa de nuevo "Empezar a chatear" y concede cámara/micro
    (funciona porque es HTTPS; en iOS el video usa `playsInline`).
-3. Abre otra pestaña/dispositivo: deben verse y escucharse en < 5 s.
-4. Prueba el gesto de deslizar horizontalmente → "Siguiente".
-5. Panel de moderación: `https://app.tudominio.com/admin`.
-6. Para verificar que el TURN funciona (usuarios detrás de NAT estrictos):
+4. Abre otra pestaña/dispositivo (también verificado): deben verse y
+   escucharse en < 5 s.
+5. Prueba el gesto de deslizar horizontalmente → "Siguiente".
+6. Panel de moderación: `https://app.tudominio.com/admin`.
+7. Para verificar que el TURN funciona (usuarios detrás de NAT estrictos):
    en `chrome://webrtc-internals`, en una llamada debe aparecer al menos un
    candidato `relay` cuando la conexión directa no sea posible.
 
@@ -141,6 +189,29 @@ curl -I https://app.tudominio.com         # → 200
 - **Actualizar:** `git pull && docker compose build && docker compose up -d`
 - **Métricas rápidas:** pestaña "Métricas" del panel `/admin`.
 
+> Actualiza siempre así (por SSH, incremental): NO recrees la máquina en
+> cada cambio. Recrearla borra la base de datos (denuncias y baneos) y
+> repite los certificados de Let's Encrypt, que tienen un límite semanal
+> de duplicados por dominio.
+
+### Actualizar un despliegue anterior a la verificación de edad
+
+Si el servidor ya estaba desplegado con una versión sin verificación de
+edad, tras el `git pull` añade a su `.env` las variables del paso 2.5
+(`PROVEEDOR_EDAD`, `AGE_JWT_SECRET`, `STRIPE_SECRET_KEY`,
+`PERMITIR_VERIFICACION_TEST=`) y reconstruye **ambos** servicios — la web
+también, porque las páginas de verificación forman parte de su build:
+
+```bash
+git pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml build web signaling
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+curl https://senal.tudominio.com/verificacion/estado-proveedor  # → "activo":true
+```
+
+Hasta que añadas las variables, el servicio arranca pero nadie puede
+emparejarse (falla cerrada): es el comportamiento esperado, no un fallo.
+
 ## Problemas frecuentes
 
 | Síntoma | Causa probable |
@@ -149,3 +220,6 @@ curl -I https://app.tudominio.com         # → 200
 | Se emparejan pero no hay video | Puertos UDP del TURN cerrados o `--external-ip` sin configurar. |
 | `connect_error` en la web | `CORS_ORIGIN` no coincide con el dominio de la web, o `NEXT_PUBLIC_SIGNALING_URL` quedó incrustada con el valor antiguo (rebuild de `web`). |
 | El panel /admin da 503 | Falta `ADMIN_PASSWORD` en `.env`. |
+| Nadie se empareja y la web redirige a `/verificar-edad` | Es el candado de edad. Si a los usuarios verificados también les pasa, revisa `PROVEEDOR_EDAD`/`AGE_JWT_SECRET` (¿rotado?) y los logs `[verificacion]` del signaling. |
+| `/verificar-edad` avisa de que no está configurada | Faltan `PROVEEDOR_EDAD` + `AGE_JWT_SECRET` (+ `STRIPE_SECRET_KEY`) en el `.env` del signaling — ver paso 2.5. |
+| Stripe rechaza crear la sesión de verificación | Identity no está activado en la cuenta, o la clave es de test (`sk_test_…`) o está revocada. El error concreto sale en los logs del signaling. |
