@@ -4,12 +4,20 @@ Plataforma web de videochat y chat de texto aleatorio 1 contra 1, con
 moderación integrada. Especificación completa en
 [`prompt-clon-videochat.md`](./prompt-clon-videochat.md).
 
-**Estado actual: MVP completo (Fases 1-5)** —
+**Estado actual: MVP completo (Fases 1-5) + verificación de edad** —
 señalización + matchmaking (intereses, país, anti-repetición), WebRTC
 completo con TURN de respaldo, modo solo texto, moderación completa
 (denuncias con frame, detector NSFW, baneos escalados, filtro de texto,
-panel `/admin`, rate limiting), landing con gate 18+/Términos, páginas
+panel `/admin`, rate limiting), verificación de edad obligatoria (falla
+cerrada, Stripe Identity), landing con gate 18+/Términos, páginas
 legales y [guía de despliegue en VPS](docs/despliegue-vps.md).
+
+> ⛔ **Antes de abrirlo al público**, repasa la
+> [checklist de lanzamiento](docs/checklist-lanzamiento.md) (verificación
+> de edad operativa, moderación humana, revisión legal, entidad
+> responsable) y el
+> [procedimiento de moderación](docs/operacion-moderacion.md). Sin esas
+> piezas el servicio no debe publicarse.
 
 ## Estructura del monorepo
 

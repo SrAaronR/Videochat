@@ -224,6 +224,14 @@ export const LIMITES = {
   denunciasPorMinuto: Number(process.env.RATE_DENUNCIAS_POR_MINUTO ?? 5),
   /** Alertas NSFW por minuto y por IP. */
   alertasNsfwPorMinuto: 6,
+  /**
+   * Sesiones de verificación de edad creadas por hora y por IP. Importante:
+   * cada sesión de Stripe Identity cuesta dinero, así que sin este límite
+   * un atacante podría generar coste ilimitado con un bucle de POST.
+   */
+  verificacionesPorHora: Number(process.env.RATE_VERIFICACIONES_POR_HORA ?? 10),
+  /** Consultas de estado de verificación por minuto y por IP (polling). */
+  estadoVerificacionPorMinuto: 60,
 };
 
 /**

@@ -39,6 +39,8 @@ services:
       TERMINOS_PROHIBIDOS: ${TERMINOS_PROHIBIDOS:-}
       RATE_MATCHES_POR_MINUTO: ${RATE_MATCHES_POR_MINUTO:-20}
       RATE_MENSAJES_POR_SEGUNDO: ${RATE_MENSAJES_POR_SEGUNDO:-5}
+      RATE_DENUNCIAS_POR_MINUTO: ${RATE_DENUNCIAS_POR_MINUTO:-5}
+      RATE_VERIFICACIONES_POR_HORA: ${RATE_VERIFICACIONES_POR_HORA:-10}
       # Detector NSFW automático: off | aviso | auto (ver .env.example).
       MODERACION_NSFW: ${MODERACION_NSFW:-aviso}
       # Ventanas de emparejamiento (ms): intereses y país (preferencia con margen).

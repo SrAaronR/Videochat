@@ -170,6 +170,16 @@ function origenPermitido(bruto: unknown): string {
   return ORIGENES.includes(candidato) ? candidato : ORIGENES[0]!;
 }
 
+/** IP real de una petición HTTP (cabecera del proxy o dirección directa). */
+function ipDeRequest(req: express.Request): string {
+  const xff = req.headers['x-forwarded-for'];
+  return (
+    (typeof xff === 'string' ? xff.split(',')[0]?.trim() : undefined) ??
+    req.socket.remoteAddress ??
+    'desconocida'
+  );
+}
+
 // Qué proveedor hay configurado (la web decide qué UI mostrar).
 app.get('/verificacion/estado-proveedor', (_req, res) => {
   const proveedor = proveedorEdadActivo();
@@ -179,6 +189,14 @@ app.get('/verificacion/estado-proveedor', (_req, res) => {
 // Crea una sesión de verificación y devuelve la URL a la que redirigir.
 app.post('/verificacion/crear', (req, res) => {
   void (async () => {
+    // Rate limit por IP: cada sesión del proveedor real cuesta dinero.
+    const permitido = await dentroDelLimite(
+      redis, 'verificacion-crear', hashIp(ipDeRequest(req)), LIMITES.verificacionesPorHora, 3600,
+    );
+    if (!permitido) {
+      res.status(429).json({ error: 'Demasiados intentos de verificación. Espera un rato.' });
+      return;
+    }
     const proveedor = proveedorEdadActivo();
     if (!proveedor) {
       res.status(503).json({
@@ -205,6 +223,14 @@ app.post('/verificacion/crear', (req, res) => {
 // `aprobarTest=1` solo tiene efecto con el proveedor 'test' (simulación).
 app.get('/verificacion/estado', (req, res) => {
   void (async () => {
+    // Rate limit del polling (también frena fuerza bruta de sesionId).
+    const permitido = await dentroDelLimite(
+      redis, 'verificacion-estado', hashIp(ipDeRequest(req)), LIMITES.estadoVerificacionPorMinuto, 60,
+    );
+    if (!permitido) {
+      res.status(429).json({ error: 'Demasiadas consultas seguidas. Espera un momento.' });
+      return;
+    }
     const sesionId = typeof req.query.sesionId === 'string' ? req.query.sesionId : '';
     if (!/^[0-9a-f-]{36}$/.test(sesionId)) {
       res.status(400).json({ error: 'sesionId inválido' });
